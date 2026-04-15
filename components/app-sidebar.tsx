@@ -9,6 +9,7 @@ import {
   Wallet,
   TrendingUp,
   Landmark,
+  HandCoins,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -37,6 +38,11 @@ const navItems = [
     label: "Депозиты",
     href: "/deposits",
     icon: Landmark,
+  },
+  {
+    label: "Кредиты и займы",
+    href: "/liabilities",
+    icon: HandCoins,
   },
 ]
 
