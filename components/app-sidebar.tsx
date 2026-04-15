@@ -8,6 +8,7 @@ import {
   ArrowUpRight,
   Wallet,
   TrendingUp,
+  Landmark,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -31,6 +32,11 @@ const navItems = [
     label: "Баланс счетов",
     href: "/balances",
     icon: Wallet,
+  },
+  {
+    label: "Депозиты",
+    href: "/deposits",
+    icon: Landmark,
   },
 ]
 

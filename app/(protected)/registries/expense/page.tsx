@@ -29,6 +29,7 @@ interface ExpenseRow {
 type ExpenseCodeLookupRow = {
   expense_code: string | null
   expense_name: string | null
+  include_in_operating_reports?: boolean | null
 }
 
 type EntityLookupRow = {
@@ -70,7 +71,8 @@ export default function ExpenseRegistryPage() {
     Promise.all([
       supabase
         .from("dim_expense_code")
-        .select("expense_code, expense_name")
+        .select("expense_code, expense_name, include_in_operating_reports")
+        .eq("include_in_operating_reports", true)
         .order("expense_name"),
       supabase
         .from("dim_entity")

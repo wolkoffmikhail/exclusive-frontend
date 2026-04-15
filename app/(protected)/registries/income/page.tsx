@@ -28,6 +28,7 @@ interface IncomeRow {
 type IncomeArticleLookupRow = {
   income_article_id: string | null
   income_name: string | null
+  include_in_operating_reports?: boolean | null
 }
 
 type EntityLookupRow = {
@@ -68,7 +69,8 @@ export default function IncomeRegistryPage() {
     Promise.all([
       supabase
         .from("dim_income_article")
-        .select("income_article_id, income_name")
+        .select("income_article_id, income_name, include_in_operating_reports")
+        .eq("include_in_operating_reports", true)
         .order("income_name"),
       supabase
         .from("dim_entity")
