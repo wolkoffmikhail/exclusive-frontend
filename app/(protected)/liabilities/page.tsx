@@ -98,6 +98,17 @@ function formatCurrency(value: number) {
   }).format(value)
 }
 
+function normalizeLiabilityAmount(value: number | string | null | undefined) {
+  return Math.abs(Number(value) || 0)
+}
+
+function cleanInstrumentName(value: string) {
+  return value
+    .replace(/^Bank loan:\s*/i, "")
+    .replace(/^Loan:\s*/i, "")
+    .trim()
+}
+
 function instrumentTypeLabel(value: string) {
   switch (value) {
     case "bank_loan":
@@ -217,11 +228,11 @@ export default function LiabilitiesPage() {
     const mapped: LiabilityRegistryRow[] = filteredRegistry.map((row) => ({
       operation_date: row.operation_date,
       lender_name: row.lender_name,
-      instrument_name: row.instrument_name,
+      instrument_name: cleanInstrumentName(row.instrument_name),
       instrument_type_label: instrumentTypeLabel(row.instrument_type),
       component_type_label: componentTypeLabel(row.component_type),
       movement_type_label: movementTypeLabel(row.movement_type),
-      amount: Number(row.amount) || 0,
+      amount: normalizeLiabilityAmount(row.amount),
       debit_credit: `${row.debit_account_code ?? "-"} / ${row.credit_account_code ?? "-"}`,
       external_ref: row.external_ref ?? null,
       comment: row.comment ?? null,
@@ -250,13 +261,13 @@ export default function LiabilitiesPage() {
       })
       .map((row) => ({
         liability_instrument_id: row.liability_instrument_id,
-        instrument_name: row.instrument_name,
+        instrument_name: cleanInstrumentName(row.instrument_name),
         lender_name: row.lender_name,
         instrument_type: row.instrument_type,
         instrument_type_label: instrumentTypeLabel(row.instrument_type),
-        principal_balance: Number(row.principal_balance) || 0,
-        interest_balance: Number(row.interest_balance) || 0,
-        total_balance: Number(row.total_balance) || 0,
+        principal_balance: normalizeLiabilityAmount(row.principal_balance),
+        interest_balance: normalizeLiabilityAmount(row.interest_balance),
+        total_balance: normalizeLiabilityAmount(row.total_balance),
         snapshot_date: row.snapshot_date,
       }))
   }, [balanceRows, instrumentType])

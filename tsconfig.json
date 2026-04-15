@@ -44,7 +44,9 @@
     ".next-check-20260415-deposits/types/**/*.ts",
     ".next-check-20260415-deposits/dev/types/**/*.ts",
     ".next-check-20260415-liabilities/types/**/*.ts",
-    ".next-check-20260415-liabilities/dev/types/**/*.ts"
+    ".next-check-20260415-liabilities/dev/types/**/*.ts",
+    ".next-check-20260415-liabilities-2/types/**/*.ts",
+    ".next-check-20260415-liabilities-2/dev/types/**/*.ts"
   ],
   "exclude": [
     "**/_backups_*",
