@@ -145,7 +145,10 @@ function parseAccount51Workbook(fileBuffer: Buffer) {
   const accountNumber = accountMatch?.[1] ?? "UNKNOWN-ACCOUNT"
   const bankName = normalizeWorkbookText(accountMatch?.[2]) || "UNKNOWN BANK"
 
-  const openingRow = rows.find((row) => normalizeKey(row.A).startsWith("САЛЬДО НА НАЧАЛО"))
+  const openingRow = rows.find((row) => {
+    const key = normalizeKey(row.A)
+    return key.startsWith("САЛЬДО НА НАЧАЛО") || key.startsWith("РЎРђР›Р¬Р”Рћ РќРђ РќРђР§РђР›Рћ")
+  })
   const movementRows = rows.slice(8).filter((row) => Boolean(normalizeWorkbookCellDate(row.A ?? "")))
 
   const incomeRows: ParsedIncomeRow[] = []
@@ -156,7 +159,8 @@ function parseAccount51Workbook(fileBuffer: Buffer) {
     const date = normalizeWorkbookCellDate(row.A ?? "")
     if (!date) continue
 
-    const rowBalance = convertCellDecimal(row.J)
+    const documentText = normalizeWorkbookText(row.B)
+    const rowBalance = convertCellDecimal(row.L) ?? convertCellDecimal(row.J)
     if (rowBalance !== null) {
       dailyClosing.set(date, row)
     }
@@ -165,8 +169,10 @@ function parseAccount51Workbook(fileBuffer: Buffer) {
     const creditAccount = normalizeWorkbookText(row.H)
     const debitAmount = convertCellDecimal(row.F)
     const creditAmount = convertCellDecimal(row.I)
+    const isIncomeDocument = /^Поступление на расчетный счет/i.test(documentText)
+    const isExpenseDocument = /^Списание с расчетного счета/i.test(documentText)
 
-    if (debitAccount === "51" && debitAmount !== null) {
+    if ((debitAccount === "51" && debitAmount !== null) || (isIncomeDocument && debitAmount !== null)) {
       const rawArticle = getArticleFromAnalytics(row.C)
       const rule = matchRule(rawArticle, importMapping.incomeRules, importMapping.incomeFallback)
       let counterparty: string | null = null
@@ -203,7 +209,7 @@ function parseAccount51Workbook(fileBuffer: Buffer) {
       continue
     }
 
-    if (creditAccount === "51" && creditAmount !== null) {
+    if ((creditAccount === "51" && creditAmount !== null) || (isExpenseDocument && creditAmount !== null)) {
       const rawArticle = getArticleFromAnalytics(row.D)
       const rule = matchRule(rawArticle, importMapping.expenseRules, importMapping.expenseFallback)
       let counterparty: string | null = null
@@ -241,7 +247,7 @@ function parseAccount51Workbook(fileBuffer: Buffer) {
   }
 
   const balanceRows: ParsedBalanceRow[] = []
-  const openingBalance = convertCellDecimal(openingRow?.J)
+  const openingBalance = convertCellDecimal(openingRow?.L) ?? convertCellDecimal(openingRow?.J)
   const firstDate = normalizeWorkbookCellDate(movementRows[0]?.A ?? "")
   if (openingBalance !== null && firstDate) {
     const openingSnapshotDate = new Date(`${firstDate}T00:00:00.000Z`)
@@ -255,7 +261,7 @@ function parseAccount51Workbook(fileBuffer: Buffer) {
   }
 
   for (const [date, row] of [...dailyClosing.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    const balance = convertCellDecimal(row.J)
+    const balance = convertCellDecimal(row.L) ?? convertCellDecimal(row.J)
     if (balance === null) continue
     balanceRows.push({
       snapshotDate: date,
