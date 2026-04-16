@@ -475,6 +475,11 @@ export async function importAccount51Card(client: SupabaseClient, fileName: stri
       .map((row) => String(row.source_row_hash ?? ""))
       .filter(Boolean)
   )
+  const existingBalanceDates = new Set(
+    (await loadAllRows(client, "fct_balance_snapshot", "snapshot_date", { account_id: accountId }))
+      .map((row) => String(row.snapshot_date ?? ""))
+      .filter(Boolean)
+  )
 
   const cashInInsert = parsed.incomeRows
     .filter((row) => !existingIncomeHashes.has(row.sourceRowHash))
@@ -513,7 +518,11 @@ export async function importAccount51Card(client: SupabaseClient, fileName: stri
     }))
 
   const balanceInsert = parsed.balanceRows
-    .filter((row) => !existingBalanceHashes.has(row.sourceRowHash))
+    .filter(
+      (row) =>
+        !existingBalanceHashes.has(row.sourceRowHash) &&
+        !existingBalanceDates.has(row.snapshotDate)
+    )
     .map((row) => ({
       snapshot_id: randomUUID(),
       snapshot_date: row.snapshotDate,
