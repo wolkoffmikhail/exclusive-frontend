@@ -96,8 +96,10 @@ export default function UploadPage() {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
+  const [isExecuting, setIsExecuting] = useState(false)
   const [files, setFiles] = useState<DetectedImportDocument[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [executionMessage, setExecutionMessage] = useState<string | null>(null)
 
   const summary = useMemo(() => {
     return {
@@ -108,6 +110,12 @@ export default function UploadPage() {
       invalid: files.filter((file) => file.validationStatus === "INVALID").length,
       duplicate: files.filter((file) => file.validationStatus === "DUPLICATE").length,
     }
+  }, [files])
+
+  const runnableFiles = useMemo(() => {
+    return files.filter(
+      (file) => file.validationStatus === "READY" || file.validationStatus === "WARNING"
+    )
   }, [files])
 
   async function detectFiles(fileList: FileList | File[]) {
@@ -139,6 +147,7 @@ export default function UploadPage() {
 
       const payload = (await response.json()) as DetectResponse
       setFiles(payload.files)
+      setExecutionMessage(null)
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -147,6 +156,52 @@ export default function UploadPage() {
       )
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  async function executeImport() {
+    if (runnableFiles.length === 0) {
+      setExecutionMessage("Нет документов, готовых к запуску импорта.")
+      return
+    }
+
+    setIsExecuting(true)
+    setExecutionMessage(null)
+
+    try {
+      const response = await fetch("/api/import-documents/execute", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          files: runnableFiles.map((file) => ({
+            fileName: file.fileName,
+            documentFamily: file.documentFamily,
+            ledgerAccount: file.ledgerAccount,
+            importerCode: file.importerCode,
+            validationStatus: file.validationStatus,
+          })),
+        }),
+      })
+
+      const payload = (await response.json().catch(() => null)) as
+        | { error?: string; message?: string }
+        | null
+
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Не удалось запустить импорт")
+      }
+
+      setExecutionMessage(payload?.message ?? "Импорт запущен")
+    } catch (executionError) {
+      setExecutionMessage(
+        executionError instanceof Error
+          ? executionError.message
+          : "Не удалось запустить импорт"
+      )
+    } finally {
+      setIsExecuting(false)
     }
   }
 
@@ -347,6 +402,57 @@ export default function UploadPage() {
           шагом поверх этого контура.
         </AlertDescription>
       </Alert>
+      <Card>
+        <CardHeader>
+          <CardTitle>Подтверждение импорта</CardTitle>
+          <CardDescription>
+            Запуск берёт только документы со статусом `Готов` или `Предупреждение`.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              type="button"
+              onClick={() => void executeImport()}
+              disabled={isExecuting || runnableFiles.length === 0}
+            >
+              {isExecuting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Запускаем…
+                </>
+              ) : (
+                "Импортировать"
+              )}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setFiles([])
+                setError(null)
+                setExecutionMessage(null)
+              }}
+              disabled={isExecuting}
+            >
+              Очистить список
+            </Button>
+          </div>
+
+          <div className="text-sm text-muted-foreground">
+            Готово к запуску:{" "}
+            <span className="font-medium text-foreground">{runnableFiles.length}</span>
+          </div>
+
+          {executionMessage ? (
+            <Alert>
+              <Upload className="h-4 w-4" />
+              <AlertTitle>Результат запуска</AlertTitle>
+              <AlertDescription>{executionMessage}</AlertDescription>
+            </Alert>
+          ) : null}
+        </CardContent>
+      </Card>
     </div>
   )
 }
