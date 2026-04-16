@@ -2,6 +2,7 @@
 import { importAccount50Card } from "@/lib/server/import-account-50"
 import { importAccount51Card } from "@/lib/server/import-account-51"
 import { importAccount55Card } from "@/lib/server/import-account-55"
+import { importAccount67Pack } from "@/lib/server/import-account-67"
 import { createAdminClient } from "@/lib/supabase/admin"
 
 type ExecuteDocument = {
@@ -65,11 +66,16 @@ export async function POST(request: Request) {
     const fileByName = new Map(uploadedFiles.map((file) => [file.name, file]))
     const importedSummaries: string[] = []
     const pendingSummaries: string[] = []
+    let handled67 = false
 
     for (const document of executable) {
       const matchingFile = fileByName.get(document.fileName)
       if (!matchingFile) {
         pendingSummaries.push(`${document.fileName}: файл не найден в текущем наборе`)
+        continue
+      }
+
+      if (document.ledgerAccount === "67" && handled67) {
         continue
       }
 
@@ -110,6 +116,50 @@ export async function POST(request: Request) {
             `55: пропущено как уже загруженное — ${result.skipped.balances} остатков`
           )
         }
+        continue
+      }
+
+      if (
+        document.importerCode === "account_67_card" ||
+        document.importerCode === "account_67_osv"
+      ) {
+        const cardDocument = executable.find(
+          (file) => file.importerCode === "account_67_card" && file.ledgerAccount === "67"
+        )
+        const osvDocument = executable.find(
+          (file) => file.importerCode === "account_67_osv" && file.ledgerAccount === "67"
+        )
+
+        if (!cardDocument || !osvDocument) {
+          pendingSummaries.push("67: для web-импорта нужен комплект карточка + ОСВ")
+          handled67 = true
+          continue
+        }
+
+        const cardFile = fileByName.get(cardDocument.fileName)
+        const osvFile = fileByName.get(osvDocument.fileName)
+        if (!cardFile || !osvFile) {
+          pendingSummaries.push("67: один из файлов комплекта не найден в текущем наборе")
+          handled67 = true
+          continue
+        }
+
+        const result = await importAccount67Pack(
+          adminClient,
+          cardFile.name,
+          Buffer.from(await cardFile.arrayBuffer()),
+          osvFile.name,
+          Buffer.from(await osvFile.arrayBuffer())
+        )
+        importedSummaries.push(
+          `67: +${result.imported.movements} движений, +${result.imported.snapshots} остатков`
+        )
+        if (result.skipped.movements || result.skipped.snapshots) {
+          pendingSummaries.push(
+            `67: пропущено как уже загруженное — ${result.skipped.movements} движений, ${result.skipped.snapshots} остатков`
+          )
+        }
+        handled67 = true
         continue
       }
 
