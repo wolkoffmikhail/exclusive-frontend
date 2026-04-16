@@ -239,19 +239,22 @@ function inspectWorkbook(buffer: Buffer) {
 }
 
 function detectDocumentFromRows(rows: SheetRow[]) {
-  const firstRows = rows.slice(0, 20)
+  const firstRows = rows.slice(0, 40)
   const allValues = firstRows.flatMap((row) => Object.values(row))
   const headerJoined = allValues.join(" | ")
   const matchedSignals: string[] = []
 
-  const hasCardColumns =
-    headerJoined.includes("Период") &&
-    headerJoined.includes("Документ") &&
-    headerJoined.includes("Аналитика Дт") &&
-    headerJoined.includes("Аналитика Кт") &&
-    headerJoined.includes("Дебет") &&
-    headerJoined.includes("Кредит") &&
-    headerJoined.includes("Текущее сальдо")
+  const cardHeaderSignals = [
+    "Период",
+    "Документ",
+    "Аналитика Дт",
+    "Аналитика Кт",
+    "Дебет",
+    "Кредит",
+    "Текущее сальдо",
+  ]
+  const cardHeaderHits = cardHeaderSignals.filter((signal) => headerJoined.includes(signal))
+  const hasCardColumns = cardHeaderHits.length >= 5
 
   const hasOsv67Sections = ["67.01", "67.02", "67.03", "67.04"].every((section) =>
     rows.some((row) => normalizeText(row.A).startsWith(`${section},`))
@@ -281,7 +284,12 @@ function detectDocumentFromRows(rows: SheetRow[]) {
   if (documentFamily === "card") {
     const counters = new Map<string, number>()
     for (const row of rows) {
-      for (const cellValue of [normalizeText(row.E), normalizeText(row.H)]) {
+      for (const cellValue of [
+        normalizeText(row.E),
+        normalizeText(row.G),
+        normalizeText(row.H),
+        normalizeText(row.I),
+      ]) {
         if (!cellValue) continue
         if (/^50(\.\d+)?$/.test(cellValue)) {
           counters.set("50", (counters.get("50") ?? 0) + 1)
@@ -299,6 +307,10 @@ function detectDocumentFromRows(rows: SheetRow[]) {
     ledgerAccount = topAccount?.[0] ?? null
     if (ledgerAccount) {
       matchedSignals.push(`ledger_${ledgerAccount}`)
+    }
+    if (!ledgerAccount && rows.some((row) => /^67\.\d+,$/.test(normalizeText(row.A)))) {
+      ledgerAccount = "67"
+      matchedSignals.push("ledger_67_by_sections")
     }
   } else if (documentFamily === "osv" && hasOsv67Sections) {
     ledgerAccount = "67"
