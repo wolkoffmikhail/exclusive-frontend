@@ -190,7 +190,7 @@ export default function UploadPage() {
         | null
 
       if (!response.ok) {
-        throw new Error(payload?.error ?? "Не удалось запустить импорт")
+        throw new Error(payload?.error ?? payload?.message ?? "Не удалось запустить импорт")
       }
 
       setExecutionMessage(payload?.message ?? "Импорт запущен")
