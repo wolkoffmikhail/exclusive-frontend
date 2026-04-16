@@ -62,7 +62,9 @@
     ".next-check-upload-account50/types/**/*.ts",
     ".next-check-upload-account50/dev/types/**/*.ts",
     ".next-check-upload-account51-expenses/types/**/*.ts",
-    ".next-check-upload-account51-expenses/dev/types/**/*.ts"
+    ".next-check-upload-account51-expenses/dev/types/**/*.ts",
+    ".next-check-upload-account55/types/**/*.ts",
+    ".next-check-upload-account55/dev/types/**/*.ts"
   ],
   "exclude": [
     "**/_backups_*",

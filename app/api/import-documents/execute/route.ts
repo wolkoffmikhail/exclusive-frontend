@@ -1,6 +1,7 @@
 ﻿import { NextResponse } from "next/server"
 import { importAccount50Card } from "@/lib/server/import-account-50"
 import { importAccount51Card } from "@/lib/server/import-account-51"
+import { importAccount55Card } from "@/lib/server/import-account-55"
 import { createAdminClient } from "@/lib/supabase/admin"
 
 type ExecuteDocument = {
@@ -95,6 +96,18 @@ export async function POST(request: Request) {
         if (result.skipped.cashIn || result.skipped.cashOut || result.skipped.balances) {
           pendingSummaries.push(
             `50: пропущено как уже загруженное — ${result.skipped.cashIn} поступлений, ${result.skipped.cashOut} выдач, ${result.skipped.balances} остатков`
+          )
+        }
+        continue
+      }
+
+      if (document.importerCode === "account_55_card") {
+        const fileBuffer = Buffer.from(await matchingFile.arrayBuffer())
+        const result = await importAccount55Card(adminClient, matchingFile.name, fileBuffer)
+        importedSummaries.push(`55: +${result.imported.balances} остатков`)
+        if (result.skipped.balances) {
+          pendingSummaries.push(
+            `55: пропущено как уже загруженное — ${result.skipped.balances} остатков`
           )
         }
         continue
