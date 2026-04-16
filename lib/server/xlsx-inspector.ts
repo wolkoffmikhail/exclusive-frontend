@@ -157,10 +157,12 @@ function parseSheetRows(xml: string, sharedStrings: string[]) {
 
   for (const rowMatch of rowMatches) {
     const cells: SheetRow = {}
-    const cellMatches = rowMatch[1].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)
+    // Excel mixes normal cells (`<c ...>...</c>`) and self-closing empty cells (`<c .../>`).
+    // We must parse both forms or column references shift after the first empty cell.
+    const cellMatches = rowMatch[1].matchAll(/<c\b([^>]*?)(?:>([\s\S]*?)<\/c>|\/>)/g)
     for (const cellMatch of cellMatches) {
       const attrs = cellMatch[1]
-      const body = cellMatch[2]
+      const body = cellMatch[2] ?? ""
       const refMatch = /r="([A-Z]+)\d+"/.exec(attrs)
       if (!refMatch) continue
       const columnRef = refMatch[1]
