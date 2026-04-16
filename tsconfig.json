@@ -58,7 +58,9 @@
     ".next-check-upload-execute-msg/types/**/*.ts",
     ".next-check-upload-execute-msg/dev/types/**/*.ts",
     ".next-check-upload-account51/types/**/*.ts",
-    ".next-check-upload-account51/dev/types/**/*.ts"
+    ".next-check-upload-account51/dev/types/**/*.ts",
+    ".next-check-upload-account50/types/**/*.ts",
+    ".next-check-upload-account50/dev/types/**/*.ts"
   ],
   "exclude": [
     "**/_backups_*",
