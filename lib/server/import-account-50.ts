@@ -149,7 +149,7 @@ function getCashAccountCode(row: SheetRow) {
 function parseAccount50Workbook(fileBuffer: Buffer) {
   const rows = readWorkbookRows(fileBuffer)
   const ownerName = normalizeWorkbookText(rows[0]?.A) || "OWNER"
-  const movementRows = rows.slice(8).filter((row) => Boolean(normalizeWorkbookCellDate(row.A ?? "")))
+  const movementRows = rows.slice(7).filter((row) => Boolean(normalizeWorkbookCellDate(row.A ?? "")))
   const openingRow = rows.find((row) => {
     const key = normalizeKey(row.A)
     return key.startsWith("САЛЬДО НА НАЧАЛО") || key.startsWith("РЎРђР›Р¬Р”Рћ РќРђ РќРђР§РђР›Рћ")

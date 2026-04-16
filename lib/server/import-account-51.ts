@@ -149,7 +149,7 @@ function parseAccount51Workbook(fileBuffer: Buffer) {
     const key = normalizeKey(row.A)
     return key.startsWith("САЛЬДО НА НАЧАЛО") || key.startsWith("РЎРђР›Р¬Р”Рћ РќРђ РќРђР§РђР›Рћ")
   })
-  const movementRows = rows.slice(8).filter((row) => Boolean(normalizeWorkbookCellDate(row.A ?? "")))
+  const movementRows = rows.slice(7).filter((row) => Boolean(normalizeWorkbookCellDate(row.A ?? "")))
 
   const incomeRows: ParsedIncomeRow[] = []
   const expenseRows: ParsedExpenseRow[] = []
