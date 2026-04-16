@@ -98,6 +98,7 @@ export default function UploadPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [isExecuting, setIsExecuting] = useState(false)
   const [files, setFiles] = useState<DetectedImportDocument[]>([])
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const [error, setError] = useState<string | null>(null)
   const [executionMessage, setExecutionMessage] = useState<string | null>(null)
 
@@ -146,6 +147,7 @@ export default function UploadPage() {
       }
 
       const payload = (await response.json()) as DetectResponse
+      setSelectedFiles(candidates)
       setFiles(payload.files)
       setExecutionMessage(null)
     } catch (requestError) {
@@ -165,24 +167,22 @@ export default function UploadPage() {
       return
     }
 
+    if (selectedFiles.length === 0) {
+      setExecutionMessage("Не найдены исходные файлы для серверного импорта. Загрузите набор заново.")
+      return
+    }
+
     setIsExecuting(true)
     setExecutionMessage(null)
 
     try {
+      const formData = new FormData()
+      formData.append("documents", JSON.stringify(runnableFiles))
+      selectedFiles.forEach((file) => formData.append("files", file))
+
       const response = await fetch("/api/import-documents/execute", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          files: runnableFiles.map((file) => ({
-            fileName: file.fileName,
-            documentFamily: file.documentFamily,
-            ledgerAccount: file.ledgerAccount,
-            importerCode: file.importerCode,
-            validationStatus: file.validationStatus,
-          })),
-        }),
+        body: formData,
       })
 
       const payload = (await response.json().catch(() => null)) as
@@ -430,6 +430,7 @@ export default function UploadPage() {
               variant="outline"
               onClick={() => {
                 setFiles([])
+                setSelectedFiles([])
                 setError(null)
                 setExecutionMessage(null)
               }}

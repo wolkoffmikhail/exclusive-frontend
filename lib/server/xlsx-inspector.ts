@@ -9,7 +9,7 @@ type ZipEntry = {
   localHeaderOffset: number
 }
 
-type SheetRow = Record<string, string>
+export type SheetRow = Record<string, string>
 
 export type DocumentFamily = "card" | "osv" | "unknown"
 export type ValidationStatus = "READY" | "WARNING" | "INVALID" | "DUPLICATE" | "BLOCKED"
@@ -40,12 +40,12 @@ function decodeXmlEntities(input: string) {
   return input.replace(/&(amp|lt|gt|quot|apos);/g, (match) => XML_ENTITIES[match] ?? match)
 }
 
-function normalizeText(input: string | null | undefined) {
+export function normalizeWorkbookText(input: string | null | undefined) {
   return (input ?? "").replace(/\r/g, " ").replace(/\n/g, " ").replace(/\s+/g, " ").trim()
 }
 
-function normalizeCellDate(input: string) {
-  const value = normalizeText(input)
+export function normalizeWorkbookCellDate(input: string) {
+  const value = normalizeWorkbookText(input)
   if (!value) return null
   const match = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(value)
   if (!match) return null
@@ -146,7 +146,7 @@ function parseSharedStrings(xml: string) {
   const strings: string[] = []
   const matches = xml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)
   for (const match of matches) {
-    strings.push(normalizeText(extractXmlTextParts(match[1])))
+    strings.push(normalizeWorkbookText(extractXmlTextParts(match[1])))
   }
   return strings
 }
@@ -179,7 +179,7 @@ function parseSheetRows(xml: string, sharedStrings: string[]) {
         value = decodeXmlEntities(valueMatch?.[1] ?? "")
       }
 
-      cells[columnRef] = normalizeText(value)
+      cells[columnRef] = normalizeWorkbookText(value)
     }
     rows.push(cells)
   }
@@ -208,7 +208,7 @@ function getWorkbookSheetTargets(workbookXml: string, relsXml: string) {
   return targets
 }
 
-function inspectWorkbook(buffer: Buffer) {
+export function readWorkbookRows(buffer: Buffer) {
   const zipEntries = parseCentralDirectory(buffer)
   const entryByName = new Map(zipEntries.map((entry) => [entry.name, entry]))
 
@@ -257,7 +257,7 @@ function detectDocumentFromRows(rows: SheetRow[]) {
   const hasCardColumns = cardHeaderHits.length >= 5
 
   const hasOsv67Sections = ["67.01", "67.02", "67.03", "67.04"].every((section) =>
-    rows.some((row) => normalizeText(row.A).startsWith(`${section},`))
+    rows.some((row) => normalizeWorkbookText(row.A).startsWith(`${section},`))
   )
 
   if (hasCardColumns) matchedSignals.push("card_columns")
@@ -270,10 +270,10 @@ function detectDocumentFromRows(rows: SheetRow[]) {
     documentFamily = "osv"
   }
 
-  const organizationName = normalizeText(rows[0]?.A ?? "") || null
+  const organizationName = normalizeWorkbookText(rows[0]?.A ?? "") || null
 
   const dates = rows
-    .map((row) => normalizeCellDate(row.A ?? ""))
+    .map((row) => normalizeWorkbookCellDate(row.A ?? ""))
     .filter((value): value is string => Boolean(value))
     .sort()
 
@@ -285,10 +285,10 @@ function detectDocumentFromRows(rows: SheetRow[]) {
     const counters = new Map<string, number>()
     for (const row of rows) {
       for (const cellValue of [
-        normalizeText(row.E),
-        normalizeText(row.G),
-        normalizeText(row.H),
-        normalizeText(row.I),
+        normalizeWorkbookText(row.E),
+        normalizeWorkbookText(row.G),
+        normalizeWorkbookText(row.H),
+        normalizeWorkbookText(row.I),
       ]) {
         if (!cellValue) continue
         if (/^50(\.\d+)?$/.test(cellValue)) {
@@ -308,7 +308,7 @@ function detectDocumentFromRows(rows: SheetRow[]) {
     if (ledgerAccount) {
       matchedSignals.push(`ledger_${ledgerAccount}`)
     }
-    if (!ledgerAccount && rows.some((row) => /^67\.\d+,$/.test(normalizeText(row.A)))) {
+    if (!ledgerAccount && rows.some((row) => /^67\.\d+,$/.test(normalizeWorkbookText(row.A)))) {
       ledgerAccount = "67"
       matchedSignals.push("ledger_67_by_sections")
     }
@@ -355,7 +355,7 @@ export async function inspectImportedWorkbook(fileName: string, fileBuffer: Buff
   const fileHash = createHash("sha256").update(fileBuffer).digest("hex")
 
   try {
-    const rows = inspectWorkbook(fileBuffer)
+    const rows = readWorkbookRows(fileBuffer)
     const detected = detectDocumentFromRows(rows)
     return {
       fileName,
