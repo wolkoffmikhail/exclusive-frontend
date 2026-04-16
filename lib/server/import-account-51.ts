@@ -162,9 +162,9 @@ function parseAccount51Workbook(fileBuffer: Buffer) {
     }
 
     const debitAccount = normalizeWorkbookText(row.E)
-    const creditAccount = normalizeWorkbookText(row.G)
+    const creditAccount = normalizeWorkbookText(row.H)
     const debitAmount = convertCellDecimal(row.F)
-    const creditAmount = convertCellDecimal(row.H)
+    const creditAmount = convertCellDecimal(row.I)
 
     if (debitAccount === "51" && debitAmount !== null) {
       const rawArticle = getArticleFromAnalytics(row.C)
