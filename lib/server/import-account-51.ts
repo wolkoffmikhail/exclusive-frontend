@@ -154,12 +154,18 @@ function parseAccount51Workbook(fileBuffer: Buffer) {
   const incomeRows: ParsedIncomeRow[] = []
   const expenseRows: ParsedExpenseRow[] = []
   const dailyClosing = new Map<string, SheetRow>()
+  let rawIncomeDocuments = 0
+  let rawExpenseDocuments = 0
 
   for (const row of movementRows) {
     const date = normalizeWorkbookCellDate(row.A ?? "")
     if (!date) continue
 
     const documentText = normalizeWorkbookText(row.B)
+    const isIncomeDocument = /^Поступление на расчетный счет/i.test(documentText)
+    const isExpenseDocument = /^Списание с расчетного счета/i.test(documentText)
+    if (isIncomeDocument) rawIncomeDocuments += 1
+    if (isExpenseDocument) rawExpenseDocuments += 1
     const rowBalance = convertCellDecimal(row.L) ?? convertCellDecimal(row.J)
     if (rowBalance !== null) {
       dailyClosing.set(date, row)
@@ -169,8 +175,6 @@ function parseAccount51Workbook(fileBuffer: Buffer) {
     const creditAccount = normalizeWorkbookText(row.H)
     const debitAmount = convertCellDecimal(row.F)
     const creditAmount = convertCellDecimal(row.I)
-    const isIncomeDocument = /^Поступление на расчетный счет/i.test(documentText)
-    const isExpenseDocument = /^Списание с расчетного счета/i.test(documentText)
 
     if ((debitAccount === "51" && debitAmount !== null) || (isIncomeDocument && debitAmount !== null)) {
       const rawArticle = getArticleFromAnalytics(row.C)
@@ -244,6 +248,14 @@ function parseAccount51Workbook(fileBuffer: Buffer) {
         sourceRowHash: getStableHash(stable),
       })
     }
+  }
+
+  if (rawIncomeDocuments > 0 && incomeRows.length === 0) {
+    throw new Error("Account 51 importer detected incoming bank documents but parsed zero income rows.")
+  }
+
+  if (rawExpenseDocuments > 0 && expenseRows.length === 0) {
+    throw new Error("Account 51 importer detected outgoing bank documents but parsed zero expense rows.")
   }
 
   const balanceRows: ParsedBalanceRow[] = []

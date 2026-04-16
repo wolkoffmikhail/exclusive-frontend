@@ -150,22 +150,44 @@ function parseAccount50Workbook(fileBuffer: Buffer) {
   const rows = readWorkbookRows(fileBuffer)
   const ownerName = normalizeWorkbookText(rows[0]?.A) || "OWNER"
   const movementRows = rows.slice(8).filter((row) => Boolean(normalizeWorkbookCellDate(row.A ?? "")))
-  const openingRow = rows.find((row) => normalizeKey(row.A).startsWith("САЛЬДО НА НАЧАЛО"))
+  const openingRow = rows.find((row) => {
+    const key = normalizeKey(row.A)
+    return key.startsWith("САЛЬДО НА НАЧАЛО") || key.startsWith("РЎРђР›Р¬Р”Рћ РќРђ РќРђР§РђР›Рћ")
+  })
 
   const incomeRows: ParsedCashRowIn[] = []
   const expenseRows: ParsedCashRowOut[] = []
   const balanceRows: ParsedCashBalance[] = []
   const dailyClosingByAccount = new Map<string, Map<string, SheetRow>>()
   const seenAccounts = new Set<string>()
+  let rawIncomeDocuments = 0
+  let rawExpenseDocuments = 0
+
+  for (const row of movementRows) {
+    const cashAccountCode = getCashAccountCode(row)
+    if (cashAccountCode) {
+      seenAccounts.add(cashAccountCode)
+    }
+  }
+
+  const seenAccountCodes = [...seenAccounts].sort()
+  const compactExpenseFallbackAccount = seenAccountCodes.length === 1 ? seenAccountCodes[0] : null
 
   for (const row of movementRows) {
     const date = normalizeWorkbookCellDate(row.A ?? "")
     if (!date) continue
-    const cashAccountCode = getCashAccountCode(row)
-    if (!cashAccountCode) continue
-    seenAccounts.add(cashAccountCode)
+    const documentText = normalizeWorkbookText(row.B)
+    const isIncomeDocument = /^Поступление наличных/i.test(documentText)
+    const isExpenseDocument = /^Выдача наличных/i.test(documentText)
+    if (isIncomeDocument) rawIncomeDocuments += 1
+    if (isExpenseDocument) rawExpenseDocuments += 1
 
-    const rowBalance = convertCellDecimal(row.J)
+    const cashAccountCode =
+      getCashAccountCode(row) ??
+      (isExpenseDocument || isIncomeDocument ? compactExpenseFallbackAccount : null)
+    if (!cashAccountCode) continue
+
+    const rowBalance = convertCellDecimal(row.L) ?? convertCellDecimal(row.J)
     if (rowBalance !== null) {
       if (!dailyClosingByAccount.has(cashAccountCode)) {
         dailyClosingByAccount.set(cashAccountCode, new Map())
@@ -176,9 +198,11 @@ function parseAccount50Workbook(fileBuffer: Buffer) {
     const debitAccount = normalizeWorkbookText(row.E)
     const creditAccount = normalizeWorkbookText(row.G)
     const debitAmount = convertCellDecimal(row.F)
-    const creditAmount = convertCellDecimal(row.H)
+    const creditAmount =
+      (isExpenseDocument ? convertCellDecimal(row.I) : null) ??
+      convertCellDecimal(row.H)
 
-    if (debitAccount === cashAccountCode && debitAmount !== null) {
+    if ((debitAccount === cashAccountCode && debitAmount !== null) || (isIncomeDocument && debitAmount !== null)) {
       const rawArticle = getArticleFromAnalytics(row.C)
       let counterparty: string | null = null
 
@@ -211,7 +235,7 @@ function parseAccount50Workbook(fileBuffer: Buffer) {
       continue
     }
 
-    if (creditAccount === cashAccountCode && creditAmount !== null) {
+    if ((creditAccount === cashAccountCode && creditAmount !== null) || (isExpenseDocument && creditAmount !== null)) {
       const rawArticle = getArticleFromAnalytics(row.D)
       let counterparty: string | null = null
       for (const line of getMeaningfulLines(row.C)) {
@@ -257,8 +281,15 @@ function parseAccount50Workbook(fileBuffer: Buffer) {
     }
   }
 
-  const seenAccountCodes = [...seenAccounts].sort()
-  const openingBalance = convertCellDecimal(openingRow?.J)
+  if (rawIncomeDocuments > 0 && incomeRows.length === 0) {
+    throw new Error("Cash account 50 importer detected incoming cash documents but parsed zero income rows.")
+  }
+
+  if (rawExpenseDocuments > 0 && expenseRows.length === 0) {
+    throw new Error("Cash account 50 importer detected outgoing cash documents but parsed zero expense rows.")
+  }
+
+  const openingBalance = convertCellDecimal(openingRow?.L) ?? convertCellDecimal(openingRow?.J)
   const firstDate = normalizeWorkbookCellDate(movementRows[0]?.A ?? "")
   if (openingBalance !== null && firstDate && seenAccountCodes.length > 0) {
     const openingSnapshotDate = new Date(`${firstDate}T00:00:00.000Z`)
@@ -274,7 +305,7 @@ function parseAccount50Workbook(fileBuffer: Buffer) {
 
   for (const [accountCode, entries] of [...dailyClosingByAccount.entries()]) {
     for (const [date, row] of [...entries.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      const balance = convertCellDecimal(row.J)
+      const balance = convertCellDecimal(row.L) ?? convertCellDecimal(row.J)
       if (balance === null) continue
       balanceRows.push({
         snapshotDate: date,
