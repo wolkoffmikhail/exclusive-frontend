@@ -185,12 +185,25 @@ export default function UploadPage() {
         body: formData,
       })
 
-      const payload = (await response.json().catch(() => null)) as
-        | { error?: string; message?: string }
-        | null
+      const rawText = await response.text()
+      const payload = (() => {
+        try {
+          return JSON.parse(rawText) as { error?: string; message?: string }
+        } catch {
+          return null
+        }
+      })()
 
       if (!response.ok) {
-        throw new Error(payload?.error ?? payload?.message ?? "Не удалось запустить импорт")
+        const fallbackText = rawText
+          ? rawText.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300)
+          : null
+        throw new Error(
+          payload?.error ??
+            payload?.message ??
+            fallbackText ??
+            "Не удалось запустить импорт"
+        )
       }
 
       setExecutionMessage(payload?.message ?? "Импорт запущен")
