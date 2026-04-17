@@ -3,15 +3,10 @@ import { importAccount50Card } from "@/lib/server/import-account-50"
 import { importAccount51Card } from "@/lib/server/import-account-51"
 import { importAccount55Card } from "@/lib/server/import-account-55"
 import { importAccount67Pack } from "@/lib/server/import-account-67"
+import { recordImportJob, type ImportJournalDocument } from "@/lib/server/import-journal"
 import { createAdminClient } from "@/lib/supabase/admin"
 
-type ExecuteDocument = {
-  fileName: string
-  documentFamily: "card" | "osv" | "unknown"
-  ledgerAccount: string | null
-  importerCode: string | null
-  validationStatus: "READY" | "WARNING" | "BLOCKED" | "INVALID" | "DUPLICATE"
-}
+type ExecuteDocument = ImportJournalDocument
 
 function has67Pair(files: ExecuteDocument[]) {
   const has67Card = files.some(
@@ -32,11 +27,14 @@ function has67Pair(files: ExecuteDocument[]) {
 export const runtime = "nodejs"
 
 export async function POST(request: Request) {
+  let files: ExecuteDocument[] = []
+  let uploadedFiles: File[] = []
+
   try {
     const formData = await request.formData()
     const rawDocuments = formData.get("documents")
-    const files = rawDocuments ? (JSON.parse(String(rawDocuments)) as ExecuteDocument[]) : []
-    const uploadedFiles = formData
+    files = rawDocuments ? (JSON.parse(String(rawDocuments)) as ExecuteDocument[]) : []
+    uploadedFiles = formData
       .getAll("files")
       .filter((value): value is File => value instanceof File)
 
@@ -168,18 +166,47 @@ export async function POST(request: Request) {
       )
     }
 
+    const message = [
+      importedSummaries.length > 0 ? `Импорт завершён. ${importedSummaries.join(". ")}` : null,
+      pendingSummaries.length > 0 ? `Следующий этап: ${pendingSummaries.join(". ")}` : null,
+    ]
+      .filter(Boolean)
+      .join(" ")
+
+    await recordImportJob(adminClient, {
+      status:
+        importedSummaries.length > 0 && pendingSummaries.length > 0
+          ? "partial_success"
+          : importedSummaries.length > 0
+            ? "success"
+            : "failed",
+      documents: executable,
+      filesCount: uploadedFiles.length,
+      message,
+      importedSummaries,
+      pendingSummaries,
+    })
+
     return NextResponse.json({
       status: "partial_success",
-      message: [
-        importedSummaries.length > 0 ? `Импорт завершён. ${importedSummaries.join(". ")}` : null,
-        pendingSummaries.length > 0 ? `Следующий этап: ${pendingSummaries.join(". ")}` : null,
-      ]
-        .filter(Boolean)
-        .join(" "),
+      message,
       imported: importedSummaries,
       pending: pendingSummaries,
     })
   } catch (error) {
+    try {
+      const adminClient = createAdminClient()
+      await recordImportJob(adminClient, {
+        status: "failed",
+        documents: files,
+        filesCount: uploadedFiles.length,
+        errorText:
+          error instanceof Error ? error.message : "Не удалось запустить импорт",
+      })
+    } catch {
+      // Ignore journal write failures.
+    }
+
     return NextResponse.json(
       {
         error:

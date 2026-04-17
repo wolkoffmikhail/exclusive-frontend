@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { FileUp, Loader2, Upload, XCircle } from "lucide-react"
 import {
   Card,
@@ -39,6 +39,24 @@ type DetectResponse = {
     invalid: number
     duplicate: number
   }
+}
+
+type ImportHistoryEntry = {
+  importJobId: string
+  status: "success" | "partial_success" | "failed"
+  documentsCount: number
+  filesCount: number
+  message: string | null
+  errorText: string | null
+  importedSummaries: string[]
+  pendingSummaries: string[]
+  createdAt: string
+  completedAt: string
+  files: DetectedImportDocument[]
+}
+
+type ImportHistoryResponse = {
+  jobs: ImportHistoryEntry[]
 }
 
 function statusLabel(status: ValidationStatus) {
@@ -92,6 +110,44 @@ function formatPeriod(periodFrom: string | null, periodTo: string | null) {
   return periodFrom ?? periodTo ?? "—"
 }
 
+function journalStatusLabel(status: ImportHistoryEntry["status"]) {
+  switch (status) {
+    case "success":
+      return "Успешно"
+    case "partial_success":
+      return "Частично"
+    case "failed":
+      return "Ошибка"
+    default:
+      return status
+  }
+}
+
+function journalStatusVariant(
+  status: ImportHistoryEntry["status"]
+): "default" | "secondary" | "destructive" | "outline" {
+  switch (status) {
+    case "success":
+      return "default"
+    case "partial_success":
+      return "secondary"
+    case "failed":
+      return "destructive"
+    default:
+      return "outline"
+  }
+}
+
+function formatJournalDate(value: string) {
+  if (!value) return "вЂ”"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat("ru-RU", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(date)
+}
+
 export default function UploadPage() {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [isDragging, setIsDragging] = useState(false)
@@ -101,6 +157,9 @@ export default function UploadPage() {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const [error, setError] = useState<string | null>(null)
   const [executionMessage, setExecutionMessage] = useState<string | null>(null)
+  const [history, setHistory] = useState<ImportHistoryEntry[]>([])
+  const [historyError, setHistoryError] = useState<string | null>(null)
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
 
   const summary = useMemo(() => {
     return {
@@ -118,6 +177,38 @@ export default function UploadPage() {
       (file) => file.validationStatus === "READY" || file.validationStatus === "WARNING"
     )
   }, [files])
+
+  async function loadHistory() {
+    setIsHistoryLoading(true)
+    setHistoryError(null)
+
+    try {
+      const response = await fetch("/api/import-documents/history", {
+        method: "GET",
+        cache: "no-store",
+      })
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null
+        throw new Error(payload?.error ?? "Не удалось загрузить журнал импортов")
+      }
+
+      const payload = (await response.json()) as ImportHistoryResponse
+      setHistory(payload.jobs ?? [])
+    } catch (historyRequestError) {
+      setHistoryError(
+        historyRequestError instanceof Error
+          ? historyRequestError.message
+          : "Не удалось загрузить журнал импортов"
+      )
+    } finally {
+      setIsHistoryLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadHistory()
+  }, [])
 
   async function detectFiles(fileList: FileList | File[]) {
     const candidates = Array.from(fileList).filter((file) =>
@@ -207,6 +298,7 @@ export default function UploadPage() {
       }
 
       setExecutionMessage(payload?.message ?? "Импорт запущен")
+      await loadHistory()
     } catch (executionError) {
       setExecutionMessage(
         executionError instanceof Error
@@ -465,6 +557,97 @@ export default function UploadPage() {
               <AlertDescription>{executionMessage}</AlertDescription>
             </Alert>
           ) : null}
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Журнал загрузок</CardTitle>
+          <CardDescription>
+            Последние запуски импорта с итогами по файлам, вставленным данным и предупреждениям.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {historyError ? (
+            <Alert variant="destructive">
+              <XCircle className="h-4 w-4" />
+              <AlertTitle>Не удалось загрузить журнал</AlertTitle>
+              <AlertDescription>{historyError}</AlertDescription>
+            </Alert>
+          ) : isHistoryLoading ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Загружаем последние импорты...
+            </div>
+          ) : history.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+              Журнал пока пуст. После первого запуска импорта здесь появятся последние операции.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {history.map((job) => (
+                <div
+                  key={job.importJobId}
+                  className="rounded-lg border bg-card p-4 shadow-sm"
+                >
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={journalStatusVariant(job.status)}>
+                          {journalStatusLabel(job.status)}
+                        </Badge>
+                        <span className="text-sm text-muted-foreground">
+                          {formatJournalDate(job.completedAt || job.createdAt)}
+                        </span>
+                      </div>
+                      <div className="text-sm font-medium">
+                        Документов: {job.documentsCount}, файлов: {job.filesCount}
+                      </div>
+                      {job.message ? (
+                        <p className="text-sm text-muted-foreground">{job.message}</p>
+                      ) : null}
+                      {job.errorText ? (
+                        <p className="text-sm text-destructive">{job.errorText}</p>
+                      ) : null}
+                    </div>
+                    <div className="space-y-1 text-sm text-muted-foreground sm:text-right">
+                      {job.files.map((file) => (
+                        <div key={`${job.importJobId}-${file.fileHash}`}>{file.fileName}</div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {job.importedSummaries.length > 0 ? (
+                    <div className="mt-4 space-y-1">
+                      <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        Импортировано
+                      </div>
+                      {job.importedSummaries.map((summaryItem, index) => (
+                        <div key={`${job.importJobId}-imported-${index}`} className="text-sm">
+                          {summaryItem}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {job.pendingSummaries.length > 0 ? (
+                    <div className="mt-4 space-y-1">
+                      <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        Примечания
+                      </div>
+                      {job.pendingSummaries.map((summaryItem, index) => (
+                        <div
+                          key={`${job.importJobId}-pending-${index}`}
+                          className="text-sm text-muted-foreground"
+                        >
+                          {summaryItem}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
