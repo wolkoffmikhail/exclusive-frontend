@@ -42,6 +42,13 @@ type InstrumentDef = {
   glAccountGroup: string
 }
 
+type GroupPartyCandidate = {
+  instrumentKey: string
+  partyName: string
+  descriptor: string | null
+  contractNumber: string | null
+}
+
 type ImportResult = {
   imported: {
     instruments: number
@@ -52,6 +59,13 @@ type ImportResult = {
     movements: number
     snapshots: number
   }
+}
+
+type ParsedLiabilityPack = {
+  ownerName: string
+  instruments: InstrumentDef[]
+  movements: LiabilityMovementDef[]
+  snapshots: LiabilitySnapshotDef[]
 }
 
 const SOURCE_SYSTEM = "liability_statement_1c_web"
@@ -202,8 +216,192 @@ function getInstrumentName(partyName: string, descriptor: string | null, glGroup
   return contractNumber ? `${normalizedParty} / ${contractNumber}` : normalizedParty
 }
 
-function getInstrumentKey(partyName: string, glGroup: string) {
+function getGroupPartyKey(partyName: string, glGroup: string) {
   return normalizeKey(`${glGroup}|${partyName}`)
+}
+
+function getDescriptorKey(descriptor: string | null | undefined) {
+  const contractNumber = parseContractNumber(descriptor)
+  if (contractNumber) return normalizeKey(contractNumber)
+  const normalizedDescriptor = normalizeWorkbookText(descriptor)
+  return normalizedDescriptor ? normalizeKey(normalizedDescriptor) : "__GENERIC__"
+}
+
+function getInstrumentKey(partyName: string, glGroup: string, descriptor: string | null = null) {
+  return normalizeKey(`${glGroup}|${partyName}|${getDescriptorKey(descriptor)}`)
+}
+
+function parsePrincipalAmountFromComment(text: string | null | undefined) {
+  const value = normalizeWorkbookText(text)
+  if (!value) return null
+  const match = /на сумму долга\s+([0-9\s.,]+)/i.exec(value)
+  return match ? convertCellDecimal(match[1]) : null
+}
+
+function getInstrumentGroupPartyKey(instrument: InstrumentDef) {
+  return normalizeKey(`${instrument.glAccountGroup}|${instrument.lenderName}`)
+}
+
+function normalizeParsedLiabilityPack(parsed: ParsedLiabilityPack): ParsedLiabilityPack {
+  const instrumentsByKey = new Map(parsed.instruments.map((instrument) => [instrument.instrumentKey, instrument]))
+  const grouped = new Map<string, InstrumentDef[]>()
+
+  for (const instrument of parsed.instruments) {
+    const key = getInstrumentGroupPartyKey(instrument)
+    const items = grouped.get(key) ?? []
+    items.push(instrument)
+    grouped.set(key, items)
+  }
+
+  const aliasMap = new Map<string, string>()
+  for (const items of grouped.values()) {
+    const withDescriptor = items.filter((instrument) => normalizeWorkbookText(instrument.contractDescriptor))
+    const generic = items.filter((instrument) => !normalizeWorkbookText(instrument.contractDescriptor))
+
+    if (withDescriptor.length === 1 && generic.length > 0) {
+      const canonicalKey = withDescriptor[0].instrumentKey
+      for (const instrument of generic) {
+        aliasMap.set(instrument.instrumentKey, canonicalKey)
+      }
+    }
+  }
+
+  const principalBalanceLookup = new Map<string, string[]>()
+  for (const snapshot of parsed.snapshots) {
+    if (snapshot.componentType !== "principal") continue
+    const canonicalKey = aliasMap.get(snapshot.instrumentKey) ?? snapshot.instrumentKey
+    const instrument = instrumentsByKey.get(canonicalKey) ?? instrumentsByKey.get(snapshot.instrumentKey)
+    if (!instrument) continue
+    const key = `${instrument.glAccountGroup}|${snapshot.balance.toFixed(2)}`
+    const items = principalBalanceLookup.get(key) ?? []
+    if (!items.includes(canonicalKey)) {
+      items.push(canonicalKey)
+      principalBalanceLookup.set(key, items)
+    }
+  }
+
+  const normalizedMovements = parsed.movements.map((movement) => {
+    let instrumentKey = aliasMap.get(movement.instrumentKey) ?? movement.instrumentKey
+    const currentInstrument = instrumentsByKey.get(instrumentKey) ?? instrumentsByKey.get(movement.instrumentKey)
+
+    if (currentInstrument?.lenderName === "Unknown lender") {
+      const principalAmount = parsePrincipalAmountFromComment(movement.comment)
+      if (principalAmount !== null) {
+        const matchedKeys =
+          principalBalanceLookup.get(`${currentInstrument.glAccountGroup}|${principalAmount.toFixed(2)}`) ?? []
+        if (matchedKeys.length === 1) {
+          instrumentKey = matchedKeys[0]
+        }
+      }
+    }
+
+    return {
+      ...movement,
+      instrumentKey,
+    }
+  })
+
+  const normalizedSnapshots = parsed.snapshots.map((snapshot) => ({
+    ...snapshot,
+    instrumentKey: aliasMap.get(snapshot.instrumentKey) ?? snapshot.instrumentKey,
+  }))
+
+  const usedInstrumentKeys = new Set<string>()
+  for (const movement of normalizedMovements) usedInstrumentKeys.add(movement.instrumentKey)
+  for (const snapshot of normalizedSnapshots) usedInstrumentKeys.add(snapshot.instrumentKey)
+
+  const dedupedInstruments = new Map<string, InstrumentDef>()
+  for (const instrument of parsed.instruments) {
+    const canonicalKey = aliasMap.get(instrument.instrumentKey) ?? instrument.instrumentKey
+    if (!usedInstrumentKeys.has(canonicalKey)) continue
+
+    const existing = dedupedInstruments.get(canonicalKey)
+    if (!existing) {
+      dedupedInstruments.set(canonicalKey, { ...instrument, instrumentKey: canonicalKey })
+      continue
+    }
+
+    if (!existing.contractDescriptor && instrument.contractDescriptor) {
+      dedupedInstruments.set(canonicalKey, { ...instrument, instrumentKey: canonicalKey })
+    }
+  }
+
+  const movementDedup = new Map<string, LiabilityMovementDef>()
+  for (const movement of normalizedMovements) {
+    movementDedup.set(movement.sourceRowHash, movement)
+  }
+
+  const snapshotDedup = new Map<string, LiabilitySnapshotDef>()
+  for (const snapshot of normalizedSnapshots) {
+    snapshotDedup.set(
+      `${snapshot.instrumentKey}|${snapshot.snapshotDate}|${snapshot.componentType}`,
+      snapshot
+    )
+  }
+
+  return {
+    ownerName: parsed.ownerName,
+    instruments: [...dedupedInstruments.values()],
+    movements: [...movementDedup.values()],
+    snapshots: [...snapshotDedup.values()],
+  }
+}
+
+function registerGroupPartyCandidate(
+  registry: Map<string, GroupPartyCandidate[]>,
+  partyName: string,
+  glGroup: string,
+  instrumentKey: string,
+  descriptor: string | null
+) {
+  const groupPartyKey = getGroupPartyKey(partyName, glGroup)
+  const items = registry.get(groupPartyKey) ?? []
+  if (!items.some((item) => item.instrumentKey === instrumentKey)) {
+    items.push({
+      instrumentKey,
+      partyName: normalizeWorkbookText(partyName),
+      descriptor,
+      contractNumber: parseContractNumber(descriptor),
+    })
+    registry.set(groupPartyKey, items)
+  }
+}
+
+function resolveInstrumentIdentity(
+  registry: Map<string, GroupPartyCandidate[]>,
+  partyName: string,
+  glGroup: string,
+  descriptor: string | null
+) {
+  const normalizedParty = normalizeWorkbookText(partyName)
+  const normalizedDescriptor = normalizeWorkbookText(descriptor)
+  const candidates = registry.get(getGroupPartyKey(normalizedParty, glGroup)) ?? []
+  const descriptorKey = getDescriptorKey(normalizedDescriptor)
+
+  if (descriptorKey !== "__GENERIC__") {
+    const exact = candidates.find((item) => getDescriptorKey(item.descriptor) === descriptorKey)
+    if (exact) {
+      return {
+        instrumentKey: exact.instrumentKey,
+        partyName: exact.partyName,
+        descriptor: exact.descriptor ?? normalizedDescriptor,
+      }
+    }
+  }
+
+  if (!normalizedDescriptor && candidates.length === 1) {
+    return {
+      instrumentKey: candidates[0].instrumentKey,
+      partyName: candidates[0].partyName,
+      descriptor: candidates[0].descriptor,
+    }
+  }
+
+  return {
+    instrumentKey: getInstrumentKey(normalizedParty, glGroup, normalizedDescriptor),
+    partyName: normalizedParty,
+    descriptor: normalizedDescriptor || null,
+  }
 }
 
 function getExternalRef(text: string | null | undefined) {
@@ -243,8 +441,11 @@ function parseLiabilityPack(cardBuffer: Buffer, osvBuffer: Buffer, cardSourceFil
   )
 
   const instrumentDefs = new Map<string, InstrumentDef>()
+  const instrumentCandidates = new Map<string, GroupPartyCandidate[]>()
   const instrumentOsv: Array<{
     instrumentKey: string
+    partyName: string
+    glGroup: string
     componentType: "principal" | "interest"
     openingBalance: number
     endingBalance: number
@@ -292,28 +493,46 @@ function parseLiabilityPack(cardBuffer: Buffer, osvBuffer: Buffer, cardSourceFil
       }
     }
 
-    const instrumentKey = getInstrumentKey(partyName, glGroup)
+    const identity = resolveInstrumentIdentity(instrumentCandidates, partyName, glGroup, descriptor)
+    const instrumentKey = identity.instrumentKey
     if (!instrumentDefs.has(instrumentKey)) {
       instrumentDefs.set(instrumentKey, {
         instrumentKey,
-        instrumentName: getInstrumentName(partyName, descriptor, glGroup),
-        instrumentType: getDefaultInstrumentType(partyName, descriptor, glGroup),
-        lenderName: normalizeWorkbookText(partyName),
-        contractNumber,
-        contractDate,
-        contractDescriptor: descriptor,
-        rateText,
+        instrumentName: getInstrumentName(identity.partyName, identity.descriptor, glGroup),
+        instrumentType: getDefaultInstrumentType(identity.partyName, identity.descriptor, glGroup),
+        lenderName: normalizeWorkbookText(identity.partyName),
+        contractNumber: parseContractNumber(identity.descriptor),
+        contractDate: parseContractDate(identity.descriptor),
+        contractDescriptor: identity.descriptor,
+        rateText: parseRateText(identity.descriptor),
         glAccountGroup: glGroup,
       })
     }
+    registerGroupPartyCandidate(instrumentCandidates, identity.partyName, glGroup, instrumentKey, identity.descriptor)
 
     const componentType = currentSection === "67.01" || currentSection === "67.03" ? "principal" : "interest"
     instrumentOsv.push({
       instrumentKey,
+      partyName: normalizeWorkbookText(identity.partyName),
+      glGroup,
       componentType,
       openingBalance,
       endingBalance,
     })
+  }
+
+  const principalBalanceLookup = new Map<string, string[]>()
+  for (const snapshot of instrumentOsv) {
+    if (snapshot.componentType !== "principal") continue
+    for (const amount of [snapshot.openingBalance, snapshot.endingBalance]) {
+      if (!amount) continue
+      const key = `${snapshot.glGroup}|${amount.toFixed(2)}`
+      const items = principalBalanceLookup.get(key) ?? []
+      if (!items.includes(snapshot.instrumentKey)) {
+        items.push(snapshot.instrumentKey)
+        principalBalanceLookup.set(key, items)
+      }
+    }
   }
 
   const movementDefs: LiabilityMovementDef[] = []
@@ -541,7 +760,9 @@ export async function importAccount67Pack(
   osvSourceFile: string,
   osvBuffer: Buffer
 ): Promise<ImportResult> {
-  const parsed = parseLiabilityPack(cardBuffer, osvBuffer, cardSourceFile, osvSourceFile)
+  const parsed = normalizeParsedLiabilityPack(
+    parseLiabilityPack(cardBuffer, osvBuffer, cardSourceFile, osvSourceFile)
+  )
 
   const partyCache = await loadPartyCache(client)
   const instrumentCache = await loadInstrumentCache(client)
