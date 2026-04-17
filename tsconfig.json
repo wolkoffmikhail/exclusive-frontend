@@ -70,7 +70,9 @@
     ".next-check-upload-journal/types/**/*.ts",
     ".next-check-upload-journal/dev/types/**/*.ts",
     ".next-check-upload-account67-fix/types/**/*.ts",
-    ".next-check-upload-account67-fix/dev/types/**/*.ts"
+    ".next-check-upload-account67-fix/dev/types/**/*.ts",
+    ".next-check-upload-account67-202425-fix/types/**/*.ts",
+    ".next-check-upload-account67-202425-fix/dev/types/**/*.ts"
   ],
   "exclude": [
     "**/_backups_*",

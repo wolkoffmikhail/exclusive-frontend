@@ -131,6 +131,29 @@ function extractPartyAndDescriptor(text: string | null | undefined) {
       }
     }
   }
+
+  const singleLine = normalizeWorkbookText(text)
+  if (!singleLine) return null
+
+  const companyMatch = /^(.*?\b(?:ООО|ПАО|АО|ИП))\s+(.+)$/u.exec(singleLine)
+  if (companyMatch && isLikelyEntityName(companyMatch[1])) {
+    return {
+      partyName: normalizeWorkbookText(companyMatch[1]),
+      descriptor: normalizeWorkbookText(companyMatch[2]) || null,
+    }
+  }
+
+  const individualMatch =
+    /^([А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z-]+ [А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z-]+ [А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z-]+)\s+(.+)$/u.exec(
+      singleLine
+    )
+  if (individualMatch && isLikelyEntityName(individualMatch[1])) {
+    return {
+      partyName: normalizeWorkbookText(individualMatch[1]),
+      descriptor: normalizeWorkbookText(individualMatch[2]) || null,
+    }
+  }
+
   return null
 }
 
@@ -548,22 +571,35 @@ function parseLiabilityPack(cardBuffer: Buffer, osvBuffer: Buffer, cardSourceFil
 
     const ctx = getLiabilityContext(row, glGroup)
     const partyName = ctx?.partyName ?? (glGroup === "67.01_67.02" ? "СБЕРБАНК ПАО" : "Unknown lender")
-    const instrumentKey = getInstrumentKey(partyName, glGroup)
+    const identity = resolveInstrumentIdentity(
+      instrumentCandidates,
+      partyName,
+      glGroup,
+      ctx?.descriptor ?? null
+    )
+    const instrumentKey = identity.instrumentKey
 
     if (!instrumentDefs.has(instrumentKey)) {
-      const descriptor = ctx?.descriptor ?? null
       instrumentDefs.set(instrumentKey, {
         instrumentKey,
-        instrumentName: getInstrumentName(partyName, descriptor, glGroup),
-        instrumentType: getDefaultInstrumentType(partyName, descriptor, glGroup),
-        lenderName: normalizeWorkbookText(partyName),
-        contractNumber: parseContractNumber(descriptor),
-        contractDate: parseContractDate(descriptor),
-        contractDescriptor: descriptor,
-        rateText: parseRateText(descriptor),
+        instrumentName: getInstrumentName(identity.partyName, identity.descriptor, glGroup),
+        instrumentType: getDefaultInstrumentType(identity.partyName, identity.descriptor, glGroup),
+        lenderName: normalizeWorkbookText(identity.partyName),
+        contractNumber: parseContractNumber(identity.descriptor),
+        contractDate: parseContractDate(identity.descriptor),
+        contractDescriptor: identity.descriptor,
+        rateText: parseRateText(identity.descriptor),
         glAccountGroup: glGroup,
       })
     }
+
+    registerGroupPartyCandidate(
+      instrumentCandidates,
+      identity.partyName,
+      glGroup,
+      instrumentKey,
+      identity.descriptor
+    )
 
     const effects: Array<{
       componentType: "principal" | "interest"
