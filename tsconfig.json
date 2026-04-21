@@ -72,7 +72,9 @@
     ".next-check-upload-account67-fix/types/**/*.ts",
     ".next-check-upload-account67-fix/dev/types/**/*.ts",
     ".next-check-upload-account67-202425-fix/types/**/*.ts",
-    ".next-check-upload-account67-202425-fix/dev/types/**/*.ts"
+    ".next-check-upload-account67-202425-fix/dev/types/**/*.ts",
+    ".next-check-20260417-liability-uppercase-fix/types/**/*.ts",
+    ".next-check-20260417-liability-uppercase-fix/dev/types/**/*.ts"
   ],
   "exclude": [
     "**/_backups_*",

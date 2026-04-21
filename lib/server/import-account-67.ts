@@ -105,7 +105,7 @@ function getPartyType(name: string) {
   const normalized = normalizeWorkbookText(name)
   if (!normalized) return "other"
   if (/\s[А-ЯЁA-Z]{2,6}$/.test(normalized)) return "company"
-  if (/^[А-ЯЁA-Z][а-яёa-z]+ [А-ЯЁA-Z][а-яёa-z]+(?: [А-ЯЁA-Z][а-яёa-z]+)?$/u.test(normalized)) {
+  if (/^[А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z-]+ [А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z-]+(?: [А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z-]+)?$/u.test(normalized)) {
     return "individual"
   }
   return "other"
@@ -117,7 +117,7 @@ function isLikelyEntityName(text: string | null | undefined) {
   if (/^67(\.|,|$)|^91\.02$|^51$/.test(value)) return false
   if (/^\d{20},/.test(value)) return false
   if (/\s[А-ЯЁA-Z]{2,6}$/.test(value)) return true
-  if (/^[А-ЯЁA-Z][а-яёa-z]+ [А-ЯЁA-Z][а-яёa-z]+(?: [А-ЯЁA-Z][а-яёa-z]+)?$/u.test(value)) return true
+  if (/^[А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z-]+ [А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z-]+(?: [А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z-]+)?$/u.test(value)) return true
   return false
 }
 
@@ -135,7 +135,7 @@ function extractPartyAndDescriptor(text: string | null | undefined) {
   const singleLine = normalizeWorkbookText(text)
   if (!singleLine) return null
 
-  const companyMatch = /^(.*?\b(?:ООО|ПАО|АО|ИП))\s+(.+)$/u.exec(singleLine)
+  const companyMatch = /^(.*?(?:ООО|ПАО|АО|ИП))\s+(.+)$/u.exec(singleLine)
   if (companyMatch && isLikelyEntityName(companyMatch[1])) {
     return {
       partyName: normalizeWorkbookText(companyMatch[1]),
