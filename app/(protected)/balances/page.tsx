@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react"
 import { createClient } from "@/lib/supabase/client"
 import { DataTable, type Column } from "@/components/data-table"
+import { DateRangePicker } from "@/components/date-range-picker"
 import { Label } from "@/components/ui/label"
 import {
   Select,
@@ -11,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { useSharedPeriod } from "@/lib/use-shared-period"
 
 interface BalanceRow {
   account_name: string | null
@@ -42,6 +44,7 @@ type BalanceRegistryRow = {
 const PAGE_SIZE = 20
 
 export default function BalancesPage() {
+  const { from, to, setFrom, setTo, ready } = useSharedPeriod()
   const [ownerEntityId, setOwnerEntityId] = useState<string>("all")
   const [bankId, setBankId] = useState<string>("all")
   const [page, setPage] = useState(1)
@@ -76,6 +79,7 @@ export default function BalancesPage() {
   }, [])
 
   const fetchData = useCallback(async () => {
+    if (!ready) return
     setLoading(true)
     const supabase = createClient()
     const offset = (page - 1) * PAGE_SIZE
@@ -86,6 +90,8 @@ export default function BalancesPage() {
         "account_id, account_name, snapshot_date, balance, bank_id, bank_name, owner_entity_id, owner_entity_name",
         { count: "exact" }
       )
+      .gte("snapshot_date", from)
+      .lte("snapshot_date", to)
       .order(sortKey as "snapshot_date", { ascending: sortDir === "asc" })
       .range(offset, offset + PAGE_SIZE - 1)
 
@@ -109,7 +115,7 @@ export default function BalancesPage() {
     )
     setTotalCount(count ?? 0)
     setLoading(false)
-  }, [ownerEntityId, bankId, page, sortKey, sortDir])
+  }, [ownerEntityId, bankId, page, sortKey, sortDir, from, to, ready])
 
   useEffect(() => {
     fetchData()
@@ -117,7 +123,7 @@ export default function BalancesPage() {
 
   useEffect(() => {
     setPage(1)
-  }, [ownerEntityId, bankId])
+  }, [ownerEntityId, bankId, from, to])
 
   const columns: Column<BalanceRow>[] = [
     { key: "account_name", label: "Счет" },
@@ -150,6 +156,12 @@ export default function BalancesPage() {
       </div>
 
       <div className="flex flex-wrap items-end gap-4">
+        <DateRangePicker
+          from={from}
+          to={to}
+          onFromChange={setFrom}
+          onToChange={setTo}
+        />
         <div className="flex flex-col gap-1.5">
           <Label className="text-xs text-muted-foreground">Владелец</Label>
           <Select value={ownerEntityId} onValueChange={setOwnerEntityId}>

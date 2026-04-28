@@ -12,7 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { format, startOfMonth, endOfMonth } from "date-fns"
+import { useSharedPeriod } from "@/lib/use-shared-period"
 
 interface IncomeRow {
   income_date: string
@@ -49,9 +49,7 @@ type IncomeRegistryApiRow = {
 const PAGE_SIZE = 20
 
 export default function IncomeRegistryPage() {
-  const now = new Date()
-  const [from, setFrom] = useState(format(startOfMonth(now), "yyyy-MM-dd"))
-  const [to, setTo] = useState(format(endOfMonth(now), "yyyy-MM-dd"))
+  const { from, to, setFrom, setTo, ready } = useSharedPeriod()
   const [incomeArticleId, setIncomeArticleId] = useState<string>("all")
   const [payerEntityId, setPayerEntityId] = useState<string>("all")
   const [page, setPage] = useState(1)
@@ -93,6 +91,7 @@ export default function IncomeRegistryPage() {
   }, [])
 
   const fetchData = useCallback(async () => {
+    if (!ready) return
     setLoading(true)
     const supabase = createClient()
     const offset = (page - 1) * PAGE_SIZE
@@ -130,7 +129,7 @@ export default function IncomeRegistryPage() {
     )
     setTotalCount(count ?? 0)
     setLoading(false)
-  }, [from, to, incomeArticleId, payerEntityId, page, sortKey, sortDir])
+  }, [from, to, incomeArticleId, payerEntityId, page, sortKey, sortDir, ready])
 
   useEffect(() => {
     fetchData()

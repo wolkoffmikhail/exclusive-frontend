@@ -1,7 +1,6 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { endOfMonth, format, startOfMonth } from "date-fns"
 import { createClient } from "@/lib/supabase/client"
 import { DateRangePicker } from "@/components/date-range-picker"
 import { DataTable, type Column } from "@/components/data-table"
@@ -20,6 +19,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { useSharedPeriod } from "@/lib/use-shared-period"
 
 type LiabilityRegistryApiRow = {
   liability_movement_id: string
@@ -157,9 +157,7 @@ function movementTypeLabel(value: string) {
 }
 
 export default function LiabilitiesPage() {
-  const now = new Date()
-  const [from, setFrom] = useState(format(startOfMonth(now), "yyyy-MM-dd"))
-  const [to, setTo] = useState(format(endOfMonth(now), "yyyy-MM-dd"))
+  const { from, to, setFrom, setTo, ready } = useSharedPeriod()
   const [instrumentType, setInstrumentType] = useState<string>("all")
   const [componentType, setComponentType] = useState<string>("all")
   const [movementType, setMovementType] = useState<string>("all")
@@ -172,6 +170,7 @@ export default function LiabilitiesPage() {
   const [balanceRows, setBalanceRows] = useState<LiabilityBalanceApiRow[]>([])
 
   const fetchData = useCallback(async () => {
+    if (!ready) return
     setLoading(true)
     const supabase = createClient()
 
@@ -199,7 +198,7 @@ export default function LiabilitiesPage() {
     setRegistryRows((registryRes.data ?? []) as LiabilityRegistryApiRow[])
     setBalanceRows((balancesRes.data ?? []) as LiabilityBalanceApiRow[])
     setLoading(false)
-  }, [from, to])
+  }, [from, to, ready])
 
   useEffect(() => {
     fetchData()

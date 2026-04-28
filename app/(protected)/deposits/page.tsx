@@ -1,7 +1,6 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { format, startOfMonth, endOfMonth } from "date-fns"
 import { createClient } from "@/lib/supabase/client"
 import { DateRangePicker } from "@/components/date-range-picker"
 import { DataTable, type Column } from "@/components/data-table"
@@ -20,6 +19,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { useSharedPeriod } from "@/lib/use-shared-period"
 
 type DepositAccountRow = {
   account_id: string
@@ -111,9 +111,7 @@ function instrumentLabel(ledgerCode: string) {
 }
 
 export default function DepositsPage() {
-  const now = new Date()
-  const [from, setFrom] = useState(format(startOfMonth(now), "yyyy-MM-dd"))
-  const [to, setTo] = useState(format(endOfMonth(now), "yyyy-MM-dd"))
+  const { from, to, setFrom, setTo, ready } = useSharedPeriod()
   const [operationType, setOperationType] = useState<string>("all")
   const [page, setPage] = useState(1)
   const [sortKey, setSortKey] = useState("operation_date")
@@ -130,6 +128,7 @@ export default function DepositsPage() {
   })
 
   const fetchData = useCallback(async () => {
+    if (!ready) return
     setLoading(true)
     const supabase = createClient()
 
@@ -274,7 +273,7 @@ export default function DepositsPage() {
       endingBalance: depositBalanceCards.reduce((sum, row) => sum + row.balance, 0),
     })
     setLoading(false)
-  }, [from, to])
+  }, [from, to, ready])
 
   useEffect(() => {
     fetchData()

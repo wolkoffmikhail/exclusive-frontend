@@ -1,7 +1,6 @@
 ﻿"use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
-import { format, startOfMonth, endOfMonth } from "date-fns"
+import { useCallback, useEffect, useState } from "react"
 import { Wallet, ArrowDownLeft, ArrowUpRight, TrendingUp } from "lucide-react"
 
 import { createClient } from "@/lib/supabase/client"
@@ -9,6 +8,7 @@ import { KpiCard } from "@/components/kpi-card"
 import { DateRangePicker } from "@/components/date-range-picker"
 import { CashflowChart } from "@/components/cashflow-chart"
 import { TopExpensesTable } from "@/components/top-expenses-table"
+import { useSharedPeriod } from "@/lib/use-shared-period"
 
 type ChartRow = { dt: string; inflow: number; outflow: number; net: number }
 type ChartApiRow = {
@@ -41,9 +41,7 @@ function formatCurrency(value: number) {
 }
 
 export default function DashboardPage() {
-  const now = useMemo(() => new Date(), [])
-  const [from, setFrom] = useState<string>(format(startOfMonth(now), "yyyy-MM-dd"))
-  const [to, setTo] = useState<string>(format(endOfMonth(now), "yyyy-MM-dd"))
+  const { from, to, setFrom, setTo, ready } = useSharedPeriod()
   const [kpis, setKpis] = useState({
     balance_start: 0,
     inflow: 0,
@@ -56,6 +54,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState<boolean>(true)
 
   const fetchData = useCallback(async () => {
+    if (!ready) return
     setLoading(true)
     const supabase = createClient()
 
@@ -109,7 +108,7 @@ export default function DashboardPage() {
     )
 
     setLoading(false)
-  }, [from, to])
+  }, [from, to, ready])
 
   useEffect(() => {
     fetchData()
