@@ -1,12 +1,13 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
+import type { ReactNode } from "react"
 import type { LucideIcon } from "lucide-react"
 
 interface KpiCardProps {
   title: string
   value: string | number
   icon: LucideIcon
-  description?: string
+  description?: ReactNode
   trend?: "up" | "down" | "neutral"
   loading?: boolean
 }
@@ -40,7 +41,7 @@ export function KpiCard({
         ) : (
           <div className="text-2xl font-bold text-card-foreground">{value}</div>
         )}
-        {description && (
+        {!loading && description && (
           <p className="mt-1 text-xs text-muted-foreground">{description}</p>
         )}
       </CardContent>

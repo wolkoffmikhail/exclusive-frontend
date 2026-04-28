@@ -31,6 +31,27 @@ type KpiRow = {
   balance_end: number | string | null
 }
 
+type AccountLookupRow = {
+  account_id: string | null
+  account_type: string | null
+  include_in_operating_reports: boolean | null
+}
+
+type SnapshotRow = {
+  account_id: string | null
+  snapshot_date: string | null
+  balance: number | string | null
+}
+
+type OperatingBalanceSplit = {
+  bank: number
+  cash: number
+}
+
+function getEmptyBalanceSplit(): OperatingBalanceSplit {
+  return { bank: 0, cash: 0 }
+}
+
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("ru-RU", {
     style: "currency",
@@ -38,6 +59,52 @@ function formatCurrency(value: number) {
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
   }).format(value)
+}
+
+function renderBalanceBreakdown(split: OperatingBalanceSplit) {
+  return (
+    <div className="mt-1 space-y-1 text-xs text-muted-foreground">
+      <div className="flex items-center justify-between gap-3">
+        <span>Расчетный счет</span>
+        <span className="font-mono">{formatCurrency(split.bank)}</span>
+      </div>
+      <div className="flex items-center justify-between gap-3">
+        <span>Касса</span>
+        <span className="font-mono">{formatCurrency(split.cash)}</span>
+      </div>
+      <div className="flex items-center justify-between gap-3 border-t pt-1 text-foreground/80">
+        <span>Итого</span>
+        <span className="font-mono">{formatCurrency(split.bank + split.cash)}</span>
+      </div>
+    </div>
+  )
+}
+
+function calculateSplitForDate(
+  targetDate: string,
+  accounts: AccountLookupRow[],
+  snapshots: SnapshotRow[]
+) {
+  const latestByAccount = new Map<string, number>()
+
+  for (const row of snapshots) {
+    const accountId = String(row.account_id ?? "")
+    const snapshotDate = String(row.snapshot_date ?? "")
+    if (!accountId || !snapshotDate || snapshotDate > targetDate) continue
+    if (latestByAccount.has(accountId)) continue
+    latestByAccount.set(accountId, Number(row.balance) || 0)
+  }
+
+  return accounts.reduce<OperatingBalanceSplit>((acc, account) => {
+    const accountId = String(account.account_id ?? "")
+    const amount = latestByAccount.get(accountId) ?? 0
+    if (account.account_type === "cash") {
+      acc.cash += amount
+    } else {
+      acc.bank += amount
+    }
+    return acc
+  }, getEmptyBalanceSplit())
 }
 
 export default function DashboardPage() {
@@ -51,6 +118,13 @@ export default function DashboardPage() {
   })
   const [chartData, setChartData] = useState<ChartRow[]>([])
   const [topExpenses, setTopExpenses] = useState<TopExpenseRow[]>([])
+  const [balanceSplit, setBalanceSplit] = useState<{
+    start: OperatingBalanceSplit
+    end: OperatingBalanceSplit
+  }>({
+    start: getEmptyBalanceSplit(),
+    end: getEmptyBalanceSplit(),
+  })
   const [loading, setLoading] = useState<boolean>(true)
 
   const fetchData = useCallback(async () => {
@@ -58,7 +132,7 @@ export default function DashboardPage() {
     setLoading(true)
     const supabase = createClient()
 
-    const [kpiRes, chartRes, topExpensesRes] = await Promise.all([
+    const [kpiRes, chartRes, topExpensesRes, accountsRes] = await Promise.all([
       supabase.rpc("rpc_dashboard_kpis", {
         p_date_from: from,
         p_date_to: to,
@@ -74,11 +148,17 @@ export default function DashboardPage() {
         p_date_to: to,
         p_limit: 10,
       }),
+      supabase
+        .from("dim_account")
+        .select("account_id, account_type, include_in_operating_reports")
+        .in("account_type", ["bank", "cash"])
+        .eq("include_in_operating_reports", true),
     ])
 
     if (kpiRes.error) console.error("rpc_dashboard_kpis error", kpiRes.error)
     if (chartRes.error) console.error("v_cashflow_daily error", chartRes.error)
     if (topExpensesRes.error) console.error("rpc_top_expenses error", topExpensesRes.error)
+    if (accountsRes.error) console.error("dim_account error", accountsRes.error)
 
     const kpiRow = (kpiRes.data?.[0] ?? null) as KpiRow | null
 
@@ -107,6 +187,42 @@ export default function DashboardPage() {
       }))
     )
 
+    const operatingAccounts = ((accountsRes.data ?? []) as AccountLookupRow[]).filter(
+      (row) => Boolean(row.account_id)
+    )
+
+    if (operatingAccounts.length > 0) {
+      const accountIds = operatingAccounts
+        .map((row) => String(row.account_id ?? ""))
+        .filter(Boolean)
+
+      const { data: snapshotData, error: snapshotError } = await supabase
+        .from("fct_balance_snapshot")
+        .select("account_id, snapshot_date, balance")
+        .in("account_id", accountIds)
+        .lte("snapshot_date", to)
+        .order("snapshot_date", { ascending: false })
+
+      if (snapshotError) {
+        console.error("fct_balance_snapshot error", snapshotError)
+        setBalanceSplit({
+          start: getEmptyBalanceSplit(),
+          end: getEmptyBalanceSplit(),
+        })
+      } else {
+        const snapshots = (snapshotData ?? []) as SnapshotRow[]
+        setBalanceSplit({
+          start: calculateSplitForDate(from, operatingAccounts, snapshots),
+          end: calculateSplitForDate(to, operatingAccounts, snapshots),
+        })
+      }
+    } else {
+      setBalanceSplit({
+        start: getEmptyBalanceSplit(),
+        end: getEmptyBalanceSplit(),
+      })
+    }
+
     setLoading(false)
   }, [from, to, ready])
 
@@ -134,7 +250,7 @@ export default function DashboardPage() {
         <KpiCard
           title="Баланс на начало"
           value={formatCurrency(kpis.balance_start)}
-          description="Остаток на начало выбранного периода"
+          description={renderBalanceBreakdown(balanceSplit.start)}
           icon={Wallet}
           loading={loading}
         />
@@ -162,7 +278,7 @@ export default function DashboardPage() {
         <KpiCard
           title="Баланс на конец"
           value={formatCurrency(kpis.balance_end)}
-          description="Остаток на конец выбранного периода"
+          description={renderBalanceBreakdown(balanceSplit.end)}
           icon={Wallet}
           loading={loading}
         />
