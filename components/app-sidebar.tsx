@@ -12,6 +12,7 @@ import {
   Landmark,
   HandCoins,
   FileArchive,
+  Scale,
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react"
@@ -61,6 +62,11 @@ const utilityItems = [
     label: "Загрузка данных",
     href: "/upload",
     icon: FileArchive,
+  },
+  {
+    label: "Сверка данных",
+    href: "/reconciliation",
+    icon: Scale,
   },
 ]
 
