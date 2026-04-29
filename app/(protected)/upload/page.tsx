@@ -12,6 +12,13 @@ import {
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Checkbox } from "@/components/ui/checkbox"
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion"
 
 type ValidationStatus = "READY" | "WARNING" | "BLOCKED" | "INVALID" | "DUPLICATE"
 type DocumentFamily = "card" | "osv" | "unknown"
@@ -57,6 +64,25 @@ type ImportHistoryEntry = {
 
 type ImportHistoryResponse = {
   jobs: ImportHistoryEntry[]
+}
+
+type HistoryStatusFilter = "all" | ImportHistoryEntry["status"]
+
+type ImportHistoryFile = {
+  fileName: string
+  fileHash?: string | null
+  documentFamily: DocumentFamily
+  ledgerAccount: string | null
+  importerCode: string | null
+  organizationName?: string | null
+  periodFrom?: string | null
+  periodTo?: string | null
+}
+
+type ReimportMatch = {
+  file: DetectedImportDocument
+  job: ImportHistoryEntry
+  matchedHistoryFile: ImportHistoryFile
 }
 
 function statusLabel(status: ValidationStatus) {
@@ -148,6 +174,24 @@ function formatJournalDate(value: string) {
   }).format(date)
 }
 
+function getDocumentKey(file: {
+  documentFamily: DocumentFamily
+  ledgerAccount: string | null
+  importerCode: string | null
+  organizationName?: string | null
+  periodFrom?: string | null
+  periodTo?: string | null
+}) {
+  return [
+    file.documentFamily,
+    file.ledgerAccount ?? "",
+    file.importerCode ?? "",
+    file.organizationName ?? "",
+    file.periodFrom ?? "",
+    file.periodTo ?? "",
+  ].join("|")
+}
+
 export default function UploadPage() {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [isDragging, setIsDragging] = useState(false)
@@ -160,6 +204,8 @@ export default function UploadPage() {
   const [history, setHistory] = useState<ImportHistoryEntry[]>([])
   const [historyError, setHistoryError] = useState<string | null>(null)
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
+  const [allowRepeatedPeriods, setAllowRepeatedPeriods] = useState(false)
+  const [historyStatusFilter, setHistoryStatusFilter] = useState<HistoryStatusFilter>("all")
 
   const summary = useMemo(() => {
     return {
@@ -177,6 +223,56 @@ export default function UploadPage() {
       (file) => file.validationStatus === "READY" || file.validationStatus === "WARNING"
     )
   }, [files])
+
+  const importPreview = useMemo(() => {
+    const groups = new Map<string, { label: string; count: number }>()
+
+    for (const file of runnableFiles) {
+      const key = `${file.ledgerAccount ?? "?"}|${file.importerCode ?? "unknown"}`
+      const label = `${file.ledgerAccount ?? "?"} • ${documentFamilyLabel(file.documentFamily)}`
+      const current = groups.get(key)
+      if (current) {
+        current.count += 1
+      } else {
+        groups.set(key, { label, count: 1 })
+      }
+    }
+
+    return [...groups.values()]
+  }, [runnableFiles])
+
+  const reimportMatches = useMemo(() => {
+    if (history.length === 0 || files.length === 0) return [] as ReimportMatch[]
+
+    const matches: ReimportMatch[] = []
+    const seen = new Set<string>()
+
+    for (const file of files) {
+      const key = getDocumentKey(file)
+      if (!file.ledgerAccount || (!file.periodFrom && !file.periodTo)) continue
+
+      for (const job of history) {
+        if (job.status === "failed") continue
+
+        for (const historyFile of job.files) {
+          const historyKey = getDocumentKey(historyFile)
+          if (key !== historyKey) continue
+
+          const dedupeKey = `${file.fileHash}|${job.importJobId}|${historyFile.fileHash ?? historyFile.fileName}`
+          if (seen.has(dedupeKey)) continue
+          seen.add(dedupeKey)
+          matches.push({ file, job, matchedHistoryFile: historyFile })
+        }
+      }
+    }
+
+    return matches
+  }, [files, history])
+
+  const filteredHistory = useMemo(() => {
+    if (historyStatusFilter === "all") return history
+    return history.filter((job) => job.status === historyStatusFilter)
+  }, [history, historyStatusFilter])
 
   async function loadHistory() {
     setIsHistoryLoading(true)
@@ -210,6 +306,12 @@ export default function UploadPage() {
     void loadHistory()
   }, [])
 
+  useEffect(() => {
+    if (reimportMatches.length === 0) {
+      setAllowRepeatedPeriods(false)
+    }
+  }, [reimportMatches.length])
+
   async function detectFiles(fileList: FileList | File[]) {
     const candidates = Array.from(fileList).filter((file) =>
       file.name.toLowerCase().endsWith(".xlsx")
@@ -241,6 +343,7 @@ export default function UploadPage() {
       setSelectedFiles(candidates)
       setFiles(payload.files)
       setExecutionMessage(null)
+      setAllowRepeatedPeriods(false)
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -260,6 +363,13 @@ export default function UploadPage() {
 
     if (selectedFiles.length === 0) {
       setExecutionMessage("Не найдены исходные файлы для серверного импорта. Загрузите набор заново.")
+      return
+    }
+
+    if (reimportMatches.length > 0 && !allowRepeatedPeriods) {
+      setExecutionMessage(
+        "Найдены документы за уже загруженный счет и период. Подтвердите повторную загрузку перед запуском."
+      )
       return
     }
 
@@ -498,6 +608,60 @@ export default function UploadPage() {
         </CardContent>
       </Card>
 
+      {reimportMatches.length > 0 ? (
+        <Alert variant="destructive">
+          <XCircle className="h-4 w-4" />
+          <AlertTitle>Найдена повторная загрузка периода</AlertTitle>
+          <AlertDescription className="space-y-2">
+            <p>
+              В журнале уже есть импорт по тем же счетам и периодам. Повторная загрузка может
+              перезаписать ожидания по данным или добавить только часть новых строк.
+            </p>
+            <div className="space-y-1 text-sm">
+              {reimportMatches.slice(0, 6).map((match) => (
+                <div
+                  key={`${match.file.fileHash}-${match.job.importJobId}-${match.matchedHistoryFile.fileName}`}
+                >
+                  {match.file.fileName} → уже загружался {formatJournalDate(
+                    match.job.completedAt || match.job.createdAt
+                  )}
+                </div>
+              ))}
+              {reimportMatches.length > 6 ? (
+                <div>И еще {reimportMatches.length - 6} совпадений.</div>
+              ) : null}
+            </div>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Предпросмотр импорта</CardTitle>
+          <CardDescription>
+            Сводка по документам, которые сейчас готовы к запуску на сервере.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {importPreview.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+              Готовых документов пока нет.
+            </div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {importPreview.map((item) => (
+                <Card key={item.label} className="gap-3 py-4">
+                  <CardHeader className="pb-0">
+                    <CardDescription>{item.label}</CardDescription>
+                    <CardTitle className="text-2xl">{item.count}</CardTitle>
+                  </CardHeader>
+                </Card>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       <Alert>
         <Upload className="h-4 w-4" />
         <AlertTitle>Следующий этап импорта</AlertTitle>
@@ -515,11 +679,34 @@ export default function UploadPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {reimportMatches.length > 0 ? (
+            <label className="flex items-start gap-3 rounded-lg border bg-muted/30 p-4 text-sm">
+              <Checkbox
+                checked={allowRepeatedPeriods}
+                onCheckedChange={(checked) => setAllowRepeatedPeriods(checked === true)}
+                className="mt-0.5"
+              />
+              <span className="space-y-1">
+                <span className="block font-medium">
+                  Разрешить повторную загрузку уже импортированного периода
+                </span>
+                <span className="block text-muted-foreground">
+                  Используй это только если ты осознанно переимпортируешь те же документы или
+                  догружаешь обновленную выгрузку за тот же период.
+                </span>
+              </span>
+            </label>
+          ) : null}
+
           <div className="flex flex-wrap items-center gap-3">
             <Button
               type="button"
               onClick={() => void executeImport()}
-              disabled={isExecuting || runnableFiles.length === 0}
+              disabled={
+                isExecuting ||
+                runnableFiles.length === 0 ||
+                (reimportMatches.length > 0 && !allowRepeatedPeriods)
+              }
             >
               {isExecuting ? (
                 <>
@@ -538,6 +725,7 @@ export default function UploadPage() {
                 setSelectedFiles([])
                 setError(null)
                 setExecutionMessage(null)
+                setAllowRepeatedPeriods(false)
               }}
               disabled={isExecuting}
             >
@@ -567,6 +755,25 @@ export default function UploadPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
+          <div className="mb-4 flex flex-wrap gap-2">
+            {([
+              ["all", "Все"],
+              ["success", "Успешно"],
+              ["partial_success", "Частично"],
+              ["failed", "Ошибки"],
+            ] as const).map(([value, label]) => (
+              <Button
+                key={value}
+                type="button"
+                variant={historyStatusFilter === value ? "default" : "outline"}
+                size="sm"
+                onClick={() => setHistoryStatusFilter(value)}
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
+
           {historyError ? (
             <Alert variant="destructive">
               <XCircle className="h-4 w-4" />
@@ -578,75 +785,87 @@ export default function UploadPage() {
               <Loader2 className="h-4 w-4 animate-spin" />
               Загружаем последние импорты...
             </div>
-          ) : history.length === 0 ? (
+          ) : filteredHistory.length === 0 ? (
             <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-              Журнал пока пуст. После первого запуска импорта здесь появятся последние операции.
+              Для выбранного фильтра пока нет записей.
             </div>
           ) : (
-            <div className="space-y-3">
-              {history.map((job) => (
-                <div
-                  key={job.importJobId}
-                  className="rounded-lg border bg-card p-4 shadow-sm"
-                >
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <Accordion type="single" collapsible className="rounded-lg border px-4">
+              {filteredHistory.map((job) => (
+                <AccordionItem key={job.importJobId} value={job.importJobId}>
+                  <AccordionTrigger className="hover:no-underline">
+                    <div className="flex min-w-0 flex-1 flex-col gap-2 text-left sm:flex-row sm:items-start sm:justify-between">
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge variant={journalStatusVariant(job.status)}>
+                            {journalStatusLabel(job.status)}
+                          </Badge>
+                          <span className="text-sm text-muted-foreground">
+                            {formatJournalDate(job.completedAt || job.createdAt)}
+                          </span>
+                        </div>
+                        <div className="text-sm font-medium">
+                          Документов: {job.documentsCount}, файлов: {job.filesCount}
+                        </div>
+                        {job.message ? (
+                          <p className="line-clamp-2 text-sm text-muted-foreground">
+                            {job.message}
+                          </p>
+                        ) : null}
+                      </div>
+                    </div>
+                  </AccordionTrigger>
+                  <AccordionContent className="space-y-4">
+                    {job.errorText ? (
+                      <p className="text-sm text-destructive">{job.errorText}</p>
+                    ) : null}
+
                     <div className="space-y-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant={journalStatusVariant(job.status)}>
-                          {journalStatusLabel(job.status)}
-                        </Badge>
-                        <span className="text-sm text-muted-foreground">
-                          {formatJournalDate(job.completedAt || job.createdAt)}
-                        </span>
-                      </div>
-                      <div className="text-sm font-medium">
-                        Документов: {job.documentsCount}, файлов: {job.filesCount}
-                      </div>
-                      {job.message ? (
-                        <p className="text-sm text-muted-foreground">{job.message}</p>
-                      ) : null}
-                      {job.errorText ? (
-                        <p className="text-sm text-destructive">{job.errorText}</p>
-                      ) : null}
-                    </div>
-                    <div className="space-y-1 text-sm text-muted-foreground sm:text-right">
-                      {job.files.map((file) => (
-                        <div key={`${job.importJobId}-${file.fileHash}`}>{file.fileName}</div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {job.importedSummaries.length > 0 ? (
-                    <div className="mt-4 space-y-1">
                       <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                        Импортировано
+                        Файлы
                       </div>
-                      {job.importedSummaries.map((summaryItem, index) => (
-                        <div key={`${job.importJobId}-imported-${index}`} className="text-sm">
-                          {summaryItem}
-                        </div>
-                      ))}
+                      <div className="space-y-1 text-sm text-muted-foreground">
+                        {job.files.map((file) => (
+                          <div key={`${job.importJobId}-${file.fileHash ?? file.fileName}`}>
+                            {file.fileName} • {file.ledgerAccount ?? "—"} •{" "}
+                            {formatPeriod(file.periodFrom ?? null, file.periodTo ?? null)}
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  ) : null}
 
-                  {job.pendingSummaries.length > 0 ? (
-                    <div className="mt-4 space-y-1">
-                      <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                        Примечания
-                      </div>
-                      {job.pendingSummaries.map((summaryItem, index) => (
-                        <div
-                          key={`${job.importJobId}-pending-${index}`}
-                          className="text-sm text-muted-foreground"
-                        >
-                          {summaryItem}
+                    {job.importedSummaries.length > 0 ? (
+                      <div className="space-y-1">
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                          Импортировано
                         </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
+                        {job.importedSummaries.map((summaryItem, index) => (
+                          <div key={`${job.importJobId}-imported-${index}`} className="text-sm">
+                            {summaryItem}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    {job.pendingSummaries.length > 0 ? (
+                      <div className="space-y-1">
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                          Примечания
+                        </div>
+                        {job.pendingSummaries.map((summaryItem, index) => (
+                          <div
+                            key={`${job.importJobId}-pending-${index}`}
+                            className="text-sm text-muted-foreground"
+                          >
+                            {summaryItem}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </AccordionContent>
+                </AccordionItem>
               ))}
-            </div>
+            </Accordion>
           )}
         </CardContent>
       </Card>
