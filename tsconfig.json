@@ -78,7 +78,9 @@
     ".next-check-shared-period/types/**/*.ts",
     ".next-check-shared-period/dev/types/**/*.ts",
     ".next-check-dashboard-balance-split/types/**/*.ts",
-    ".next-check-dashboard-balance-split/dev/types/**/*.ts"
+    ".next-check-dashboard-balance-split/dev/types/**/*.ts",
+    ".next-check-sidebar-collapse/types/**/*.ts",
+    ".next-check-sidebar-collapse/dev/types/**/*.ts"
   ],
   "exclude": [
     "**/_backups_*",
