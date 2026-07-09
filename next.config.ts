@@ -1,19 +1,19 @@
-﻿import type { NextConfig } from "next";
+import type { NextConfig } from "next";
 
-const supabaseInternal = process.env.SUPABASE_INTERNAL_URL?.replace(/\/$/, "");
-const buildDir = process.env.NEXT_DIST_DIR || ".next-exclusive";
+const supabaseInternalUrl = process.env.SUPABASE_INTERNAL_URL?.replace(/\/$/, "");
 
 const nextConfig: NextConfig = {
-  distDir: buildDir,
+  output: "standalone",
+  poweredByHeader: false,
   async rewrites() {
-    if (!supabaseInternal) {
+    if (!supabaseInternalUrl) {
       return [];
     }
 
     return [
       {
         source: "/supabase/:path*",
-        destination: `${supabaseInternal}/:path*`,
+        destination: `${supabaseInternalUrl}/:path*`,
       },
     ];
   },
