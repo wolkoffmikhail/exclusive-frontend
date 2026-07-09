@@ -7,7 +7,10 @@ export function getSupabaseBrowserConfig() {
   if (!url || !publishableKey) {
     throw new Error("Supabase browser configuration is missing");
   }
-  return { url, key: publishableKey };
+  const resolvedUrl = url.startsWith("/")
+    ? new URL(url, window.location.origin).toString()
+    : url;
+  return { url: resolvedUrl, key: publishableKey };
 }
 
 export function getSupabaseServerConfig() {
