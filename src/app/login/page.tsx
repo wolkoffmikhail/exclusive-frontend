@@ -1,4 +1,5 @@
-import Link from "next/link";
+import { Suspense } from "react";
+import { LoginForm } from "./login-form";
 
 export default function LoginPage() {
   return (
@@ -7,11 +8,11 @@ export default function LoginPage() {
         <p className="text-sm font-medium text-accent">Private Office</p>
         <h1 className="mt-3 text-3xl font-semibold">Вход</h1>
         <p className="mt-3 text-sm leading-6 text-muted">
-          Форма будет подключена к существующему Supabase Auth после фиксации схемы пользователей и семей.
+          Используйте учётную запись, выданную администратором семьи.
         </p>
-        <Link className="mt-8 block rounded-xl bg-accent px-4 py-3 text-center font-medium text-white" href="/dashboard">
-          Открыть демо-каркас
-        </Link>
+        <Suspense fallback={<p className="mt-8 text-sm text-muted">Загрузка формы…</p>}>
+          <LoginForm />
+        </Suspense>
       </section>
     </main>
   );

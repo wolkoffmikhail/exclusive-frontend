@@ -1,5 +1,8 @@
 import Link from "next/link";
-import { Bell, BriefcaseBusiness } from "lucide-react";
+import { redirect } from "next/navigation";
+import { Bell, BriefcaseBusiness, LogOut } from "lucide-react";
+import { createClient } from "@/lib/supabase/server";
+import { signOut } from "./actions";
 
 const navigation = [
   ["dashboard", "Обзор"],
@@ -13,7 +16,29 @@ const navigation = [
   ["settings", "Настройки"],
 ] as const;
 
-export default function ProtectedLayout({ children }: { children: React.ReactNode }) {
+export const dynamic = "force-dynamic";
+
+export default async function ProtectedLayout({ children }: { children: React.ReactNode }) {
+  const supabase = await createClient();
+  const { data: claimsData } = await supabase.auth.getClaims();
+  const userId = claimsData?.claims?.sub;
+  if (!userId) redirect("/login");
+
+  const { data: membership } = await supabase
+    .from("family_members")
+    .select("family_id, role, families(name)")
+    .eq("user_id", userId)
+    .limit(1)
+    .maybeSingle();
+
+  const family = Array.isArray(membership?.families)
+    ? membership.families[0]
+    : membership?.families;
+  const familyName =
+    family && typeof family === "object" && "name" in family
+      ? String(family.name)
+      : "Семья не назначена";
+
   return (
     <div className="min-h-screen lg:grid lg:grid-cols-[260px_1fr]">
       <aside className="border-b border-border bg-[#10271c] p-6 text-white lg:min-h-screen lg:border-r">
@@ -35,11 +60,18 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
         <header className="flex h-20 items-center justify-between border-b border-border bg-surface px-6 lg:px-10">
           <div>
             <p className="text-xs text-muted">Активная семья</p>
-            <p className="font-medium">Демо-портфель</p>
+            <p className="font-medium">{familyName}</p>
           </div>
-          <button aria-label="Уведомления" className="rounded-full border border-border p-2.5">
-            <Bell size={18} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button aria-label="Уведомления" className="rounded-full border border-border p-2.5">
+              <Bell size={18} />
+            </button>
+            <form action={signOut}>
+              <button aria-label="Выйти" className="rounded-full border border-border p-2.5" type="submit">
+                <LogOut size={18} />
+              </button>
+            </form>
+          </div>
         </header>
         <main className="p-6 lg:p-10">{children}</main>
       </div>
