@@ -1,7 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { getActiveFamily, getPortfolioData, type Account, type Asset, type ImportJob, type Operation, type PortfolioData } from "@/lib/portfolio/data";
 import { createClient } from "@/lib/supabase/server";
-import { parseBrokerImport, uploadBrokerReport } from "./import-actions";
+import { applyBrokerImport, parseBrokerImport, uploadBrokerReport } from "./import-actions";
 
 const sections: Record<string, { title: string; description: string }> = {
   dashboard: { title: "Обзор портфеля", description: "Структура семейного портфеля, счета, активы и ближайшие действия." },
@@ -250,7 +250,21 @@ function ImportUploadForm({ accounts }: { accounts: Account[] }) {
   );
 }
 
-function ImportNotice({ error, parsed, parseError, uploaded }: { error?: string; parsed?: string; parseError?: string; uploaded?: string }) {
+function ImportNotice({
+  applied,
+  applyError,
+  error,
+  parsed,
+  parseError,
+  uploaded,
+}: {
+  applied?: string;
+  applyError?: string;
+  error?: string;
+  parsed?: string;
+  parseError?: string;
+  uploaded?: string;
+}) {
   const errors: Record<string, string> = {
     "no-family": "Для пользователя не назначена семья.",
     forbidden: "У роли viewer нет права загружать отчёты.",
@@ -271,10 +285,21 @@ function ImportNotice({ error, parsed, parseError, uploaded }: { error?: string;
     "empty-csv": "В CSV нет строк данных.",
     "row-validation": "Файл разобран, но часть строк не прошла базовую проверку.",
   };
+  const applyErrors: Record<string, string> = {
+    "no-family": "Для пользователя не назначена семья.",
+    forbidden: "У роли viewer нет права применять импорт.",
+    "import-required": "Не выбран импорт для применения.",
+    "import-not-found": "Импорт не найден или недоступен.",
+    "account-required": "У импорта нет привязанного счёта.",
+    "no-normalized-rows": "Нет нормализованных строк для применения.",
+    "row-apply": "Часть строк не удалось превратить в операции.",
+  };
 
   if (uploaded) return <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">Файл загружен, запись импорта создана.</div>;
   if (parsed) return <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">CSV разобран, строки импорта сохранены.</div>;
+  if (applied) return <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">Импорт применён, операции портфеля созданы.</div>;
   if (parseError) return <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">{parseErrors[parseError] ?? "Не удалось разобрать файл."}</div>;
+  if (applyError) return <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">{applyErrors[applyError] ?? "Не удалось применить импорт."}</div>;
   if (!error) return null;
   return <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">{errors[error] ?? "Не удалось загрузить файл."}</div>;
 }
@@ -289,6 +314,11 @@ function normalizedPreview(value: Record<string, unknown> | null) {
 function canParseCsv(importJob: ImportJob) {
   return importJob.original_file_name.toLowerCase().endsWith(".csv")
     && ["uploaded", "parsed", "failed"].includes(importJob.status);
+}
+
+function canApplyImport(importJob: ImportJob, rows: PortfolioData["importRows"]) {
+  return ["parsed", "failed"].includes(importJob.status)
+    && rows.some((row) => row.status === "normalized");
 }
 
 function ImportsView({ data }: { data: PortfolioData }) {
@@ -318,6 +348,14 @@ function ImportsView({ data }: { data: PortfolioData }) {
                   <input name="import_id" type="hidden" value={importJob.id} />
                   <button className="rounded-2xl bg-accent px-4 py-2 text-xs font-medium text-white" type="submit">
                     Разобрать CSV
+                  </button>
+                </form>
+              )}
+              {canApplyImport(importJob, rows) && (
+                <form action={applyBrokerImport}>
+                  <input name="import_id" type="hidden" value={importJob.id} />
+                  <button className="rounded-2xl bg-emerald-600 px-4 py-2 text-xs font-medium text-white" type="submit">
+                    Применить в операции
                   </button>
                 </form>
               )}
@@ -376,6 +414,8 @@ function PlaceholderView({ section }: { section: string }) {
 }
 
 function SectionContent({
+  applied,
+  applyError,
   data,
   error,
   parsed,
@@ -383,6 +423,8 @@ function SectionContent({
   section,
   uploaded,
 }: {
+  applied?: string;
+  applyError?: string;
   data: PortfolioData;
   error?: string;
   parsed?: string;
@@ -398,7 +440,7 @@ function SectionContent({
   if (section === "import") {
     return (
       <div className="space-y-6">
-        <ImportNotice error={error} parsed={parsed} parseError={parseError} uploaded={uploaded} />
+        <ImportNotice applied={applied} applyError={applyError} error={error} parsed={parsed} parseError={parseError} uploaded={uploaded} />
         <ImportUploadForm accounts={data.accounts} />
         <div className="rounded-3xl border border-border bg-surface p-6">
           <p className="text-sm font-medium text-accent">Storage готов</p>
@@ -440,6 +482,8 @@ export default async function SectionPage({
       <p className="mt-3 max-w-2xl text-muted">{current.description}</p>
       <div className="mt-10">
         <SectionContent
+          applied={queryValue(query.applied)}
+          applyError={queryValue(query.apply_error)}
           data={data}
           error={queryValue(query.error)}
           parsed={queryValue(query.parsed)}

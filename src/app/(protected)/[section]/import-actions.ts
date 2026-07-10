@@ -41,6 +41,10 @@ function redirectWithParseError(code: string): never {
   redirect(`/import?parse_error=${encodeURIComponent(code)}`);
 }
 
+function redirectWithApplyError(code: string): never {
+  redirect(`/import?apply_error=${encodeURIComponent(code)}`);
+}
+
 function parseCsv(text: string) {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -110,20 +114,150 @@ function toOptionalNumber(value: string | undefined) {
 
 function normalizeImportRow(raw: Record<string, string>) {
   const tradeDate = raw.trade_date || raw.date || raw["дата"] || "";
+  const settleDate = raw.settle_date || raw["дата_расчетов"] || "";
   const operationType = (raw.operation_type || raw.type || raw["операция"] || "").toLowerCase();
   const ticker = raw.ticker || raw.symbol || raw["тикер"] || "";
+  const assetName = raw.asset_name || raw.asset || raw.name || raw["название"] || "";
+  const market = raw.market || raw.exchange || raw["рынок"] || "";
   const quantity = toOptionalNumber(raw.quantity || raw.qty || raw["количество"]);
   const price = toOptionalNumber(raw.price || raw["цена"]);
+  const amount = toOptionalNumber(raw.amount || raw.gross_amount || raw.sum || raw["сумма"]);
+  const fee = toOptionalNumber(raw.fee || raw.fee_amount || raw.commission || raw["комиссия"]);
+  const tax = toOptionalNumber(raw.tax || raw.tax_amount || raw["налог"]);
   const currency = (raw.currency || raw["валюта"] || "").toUpperCase();
 
   return {
     trade_date: tradeDate || null,
+    settle_date: settleDate || null,
     operation_type: operationType || null,
     ticker: ticker || null,
+    asset_name: assetName || null,
+    market: market || null,
     quantity,
     price,
+    gross_amount: amount,
+    fee_amount: fee,
+    tax_amount: tax,
     currency: currency || null,
   };
+}
+
+type NormalizedImportRow = {
+  trade_date?: unknown;
+  settle_date?: unknown;
+  operation_type?: unknown;
+  ticker?: unknown;
+  asset_name?: unknown;
+  market?: unknown;
+  quantity?: unknown;
+  price?: unknown;
+  gross_amount?: unknown;
+  fee_amount?: unknown;
+  tax_amount?: unknown;
+  currency?: unknown;
+};
+
+const supportedOperationTypes = new Set([
+  "buy",
+  "sell",
+  "dividend",
+  "coupon",
+  "tax",
+  "fee",
+  "deposit",
+  "withdrawal",
+  "transfer_in",
+  "transfer_out",
+  "split",
+  "price_snapshot",
+  "other",
+]);
+
+const negativeCashOperationTypes = new Set(["buy", "fee", "tax", "withdrawal", "transfer_out"]);
+
+function textValue(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function numberValue(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") return toOptionalNumber(value) ?? null;
+  return null;
+}
+
+function grossAmountFor(normalized: NormalizedImportRow) {
+  const explicitAmount = numberValue(normalized.gross_amount);
+  if (explicitAmount !== null) return Math.abs(explicitAmount);
+
+  const quantity = numberValue(normalized.quantity);
+  const price = numberValue(normalized.price);
+  if (quantity !== null && price !== null) return Math.abs(quantity * price);
+
+  return null;
+}
+
+function netAmountFor(operationType: string, grossAmount: number, feeAmount: number, taxAmount: number) {
+  if (negativeCashOperationTypes.has(operationType)) {
+    return -Math.abs(grossAmount + feeAmount + taxAmount);
+  }
+
+  return Math.abs(grossAmount - feeAmount - taxAmount);
+}
+
+async function findOrCreateAsset({
+  currencyCode,
+  familyId,
+  market,
+  name,
+  supabase,
+  ticker,
+  userId,
+}: {
+  currencyCode: string;
+  familyId: string;
+  market: string | null;
+  name: string | null;
+  supabase: Awaited<ReturnType<typeof createClient>>;
+  ticker: string | null;
+  userId: string;
+}) {
+  const normalizedTicker = ticker?.trim().toUpperCase() || null;
+  if (!normalizedTicker) return null;
+
+  const { data: existingAsset } = await supabase
+    .from("assets")
+    .select("id")
+    .eq("family_id", familyId)
+    .eq("ticker", normalizedTicker)
+    .maybeSingle();
+
+  if (existingAsset?.id) return existingAsset.id as string;
+
+  const { data: insertedAsset, error: insertError } = await supabase
+    .from("assets")
+    .insert({
+      family_id: familyId,
+      asset_type_code: "stock",
+      name: name || normalizedTicker,
+      ticker: normalizedTicker,
+      market,
+      currency_code: currencyCode,
+      created_by: userId,
+    })
+    .select("id")
+    .single();
+
+  if (!insertError && insertedAsset?.id) return insertedAsset.id as string;
+
+  const { data: fallbackAsset } = await supabase
+    .from("assets")
+    .select("id")
+    .eq("family_id", familyId)
+    .eq("ticker", normalizedTicker)
+    .maybeSingle();
+
+  if (fallbackAsset?.id) return fallbackAsset.id as string;
+  throw new Error(`Asset creation failed: ${insertError?.message ?? "unknown error"}`);
 }
 
 export async function uploadBrokerReport(formData: FormData) {
@@ -329,4 +463,171 @@ export async function parseBrokerImport(formData: FormData) {
 
   revalidatePath("/import");
   redirect(failedRows > 0 ? "/import?parse_error=row-validation" : "/import?parsed=1");
+}
+
+export async function applyBrokerImport(formData: FormData) {
+  const supabase = await createClient();
+  const { data: claimsData } = await supabase.auth.getClaims();
+  const userId = claimsData?.claims?.sub;
+  if (!userId) redirect("/login");
+
+  const family = await getActiveFamily(supabase, userId);
+  if (!family) redirectWithApplyError("no-family");
+  if (family.role === "viewer") redirectWithApplyError("forbidden");
+
+  const importId = String(formData.get("import_id") ?? "");
+  if (!importId) redirectWithApplyError("import-required");
+
+  const { data: importJob } = await supabase
+    .from("imports")
+    .select("id, family_id, portfolio_id, account_id, status")
+    .eq("family_id", family.id)
+    .eq("id", importId)
+    .maybeSingle();
+
+  if (!importJob) redirectWithApplyError("import-not-found");
+  if (!importJob.account_id) redirectWithApplyError("account-required");
+
+  const { data: rowsToApply, error: rowsError } = await supabase
+    .from("import_rows")
+    .select("id, row_number, normalized_data, status")
+    .eq("family_id", family.id)
+    .eq("import_id", importId)
+    .eq("status", "normalized")
+    .order("row_number", { ascending: true });
+
+  if (rowsError) throw new Error(`Import rows lookup failed: ${rowsError.message}`);
+
+  if (!rowsToApply || rowsToApply.length === 0) {
+    if (importJob.status === "applied") redirect("/import?applied=1");
+    redirectWithApplyError("no-normalized-rows");
+  }
+
+  await supabase
+    .from("imports")
+    .update({ status: "applying", error_message: null, started_at: new Date().toISOString() })
+    .eq("family_id", family.id)
+    .eq("id", importId);
+
+  let appliedRows = 0;
+  let failedRows = 0;
+
+  for (const row of rowsToApply) {
+    const normalized = (row.normalized_data ?? {}) as NormalizedImportRow;
+    const operationType = textValue(normalized.operation_type).toLowerCase();
+    const tradeDate = textValue(normalized.trade_date);
+    const settleDate = textValue(normalized.settle_date) || null;
+    const ticker = textValue(normalized.ticker).toUpperCase() || null;
+    const assetName = textValue(normalized.asset_name) || ticker;
+    const market = textValue(normalized.market).toUpperCase() || null;
+    const currencyCode = textValue(normalized.currency).toUpperCase() || family.baseCurrency;
+    const quantity = numberValue(normalized.quantity);
+    const price = numberValue(normalized.price);
+    const grossAmount = grossAmountFor(normalized);
+    const feeAmount = Math.abs(numberValue(normalized.fee_amount) ?? 0);
+    const taxAmount = Math.abs(numberValue(normalized.tax_amount) ?? 0);
+
+    if (!supportedOperationTypes.has(operationType) || !tradeDate || grossAmount === null) {
+      failedRows += 1;
+      await supabase
+        .from("import_rows")
+        .update({
+          status: "failed",
+          error_message: "Cannot apply row: operation_type, trade_date or amount is missing",
+        })
+        .eq("family_id", family.id)
+        .eq("id", row.id);
+      continue;
+    }
+
+    const assetId = await findOrCreateAsset({
+      currencyCode,
+      familyId: family.id,
+      market,
+      name: assetName,
+      supabase,
+      ticker,
+      userId,
+    });
+
+    const netAmount = netAmountFor(operationType, grossAmount, feeAmount, taxAmount);
+
+    const { data: operation, error: operationError } = await supabase
+      .from("operations")
+      .insert({
+        family_id: family.id,
+        portfolio_id: importJob.portfolio_id,
+        account_id: importJob.account_id,
+        asset_id: assetId,
+        operation_type_code: operationType,
+        trade_date: tradeDate,
+        settle_date: settleDate,
+        quantity,
+        price,
+        gross_amount: grossAmount,
+        fee_amount: feeAmount,
+        tax_amount: taxAmount,
+        net_amount: netAmount,
+        currency_code: currencyCode,
+        source_import_id: importId,
+        source_import_row_id: row.id,
+        notes: `Created from import row ${row.row_number}`,
+        occurred_at: `${tradeDate}T00:00:00.000Z`,
+        created_by: userId,
+      })
+      .select("id")
+      .single();
+
+    if (operationError || !operation?.id) {
+      failedRows += 1;
+      await supabase
+        .from("import_rows")
+        .update({
+          status: "failed",
+          error_message: operationError?.message ?? "Operation creation failed",
+        })
+        .eq("family_id", family.id)
+        .eq("id", row.id);
+      continue;
+    }
+
+    appliedRows += 1;
+    await supabase
+      .from("import_rows")
+      .update({
+        status: "applied",
+        error_message: null,
+        created_entity_table: "operations",
+        created_entity_id: operation.id,
+        created_operation_id: operation.id,
+      })
+      .eq("family_id", family.id)
+      .eq("id", row.id);
+  }
+
+  await supabase
+    .from("imports")
+    .update({
+      status: failedRows > 0 ? "failed" : "applied",
+      error_message: failedRows > 0 ? `${failedRows} rows failed applying` : null,
+      finished_at: new Date().toISOString(),
+    })
+    .eq("family_id", family.id)
+    .eq("id", importId);
+
+  await supabase.from("audit_log").insert({
+    family_id: family.id,
+    actor_user_id: userId,
+    action: "apply_broker_import",
+    entity_table: "imports",
+    entity_id: importId,
+    after_data: {
+      rows_applied: appliedRows,
+      rows_failed: failedRows,
+    },
+  });
+
+  revalidatePath("/import");
+  revalidatePath("/dashboard");
+  redirect(failedRows > 0 ? "/import?apply_error=row-apply" : "/import?applied=1");
 }
