@@ -1,6 +1,7 @@
 import { notFound, redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
 import { getActiveFamily, getPortfolioData, type Account, type Asset, type ImportJob, type Operation, type PortfolioData } from "@/lib/portfolio/data";
+import { createClient } from "@/lib/supabase/server";
+import { uploadBrokerReport } from "./import-actions";
 
 const sections: Record<string, { title: string; description: string }> = {
   dashboard: {
@@ -89,6 +90,16 @@ function assetTypeLabel(type: string) {
   };
 
   return labels[type] ?? type;
+}
+
+function formatFileSize(size: number | null) {
+  if (!size) return "—";
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function queryValue(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function EmptyState({ text }: { text: string }) {
@@ -229,6 +240,95 @@ function OperationsView({ operations }: { operations: Operation[] }) {
   );
 }
 
+function ImportUploadForm({ accounts }: { accounts: Account[] }) {
+  const activeAccounts = accounts.filter((account) => account.status === "active");
+
+  return (
+    <form action={uploadBrokerReport} className="rounded-3xl border border-border bg-surface p-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-medium text-accent">Первый рабочий импорт</p>
+          <h2 className="mt-2 text-xl font-semibold">Загрузить брокерский отчёт</h2>
+          <p className="mt-2 max-w-2xl text-sm text-muted">
+            Файл сохранится в private bucket, а в журнале появится запись со статусом “загружен”.
+            Парсинг и разбор строк добавим следующим шагом.
+          </p>
+        </div>
+        <span className="rounded-full bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
+          PDF · CSV · XLS · XLSX
+        </span>
+      </div>
+
+      <div className="mt-6 grid gap-4 md:grid-cols-[1fr_1.4fr_auto] md:items-end">
+        <label className="grid gap-2 text-sm">
+          <span className="font-medium">Счёт</span>
+          <select
+            className="h-11 rounded-2xl border border-border bg-background px-4"
+            disabled={activeAccounts.length === 0}
+            name="account_id"
+            required
+          >
+            <option value="">Выберите счёт</option>
+            {activeAccounts.map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.name} · {account.currency_code}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="grid gap-2 text-sm">
+          <span className="font-medium">Файл отчёта</span>
+          <input
+            accept=".pdf,.csv,.xls,.xlsx,application/pdf,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            className="rounded-2xl border border-border bg-background px-4 py-2.5 text-sm"
+            name="report"
+            required
+            type="file"
+          />
+        </label>
+
+        <button
+          className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={activeAccounts.length === 0}
+          type="submit"
+        >
+          Загрузить
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function ImportNotice({ error, uploaded }: { error?: string; uploaded?: string }) {
+  const errors: Record<string, string> = {
+    "no-family": "Для пользователя не назначена семья.",
+    forbidden: "У роли viewer нет права загружать отчёты.",
+    "account-required": "Выберите счёт для импорта.",
+    "account-not-found": "Выбранный счёт не найден или недоступен.",
+    "file-required": "Выберите файл отчёта.",
+    "file-too-large": "Файл больше лимита 50 MB.",
+    "file-type": "Поддерживаются только PDF, CSV, XLS и XLSX.",
+    duplicate: "Такой файл уже загружался для выбранного счёта.",
+  };
+
+  if (uploaded) {
+    return (
+      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+        Файл загружен, запись импорта создана.
+      </div>
+    );
+  }
+
+  if (!error) return null;
+
+  return (
+    <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">
+      {errors[error] ?? "Не удалось загрузить файл."}
+    </div>
+  );
+}
+
 function ImportsView({ imports }: { imports: ImportJob[] }) {
   if (imports.length === 0) {
     return <EmptyState text="Файлы ещё не загружались. Контур импорта и private bucket уже готовы." />;
@@ -238,8 +338,18 @@ function ImportsView({ imports }: { imports: ImportJob[] }) {
     <div className="space-y-3">
       {imports.map((importJob) => (
         <div className="rounded-2xl border border-border bg-surface p-4" key={importJob.id}>
-          <p className="font-medium">{importJob.original_file_name}</p>
-          <p className="mt-1 text-sm text-muted">Статус: {statusLabel(importJob.status)}</p>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="font-medium">{importJob.original_file_name}</p>
+              <p className="mt-1 text-sm text-muted">
+                Статус: {statusLabel(importJob.status)} · {formatFileSize(importJob.file_size_bytes)}
+              </p>
+              <p className="mt-2 break-all text-xs text-muted">{importJob.storage_object_key}</p>
+            </div>
+            <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">
+              SHA-256: {importJob.sha256.slice(0, 10)}…
+            </span>
+          </div>
         </div>
       ))}
     </div>
@@ -267,7 +377,17 @@ function PlaceholderView({ section }: { section: string }) {
   return <EmptyState text={details[section] ?? "Раздел подготовлен, данные подключим на следующем шаге."} />;
 }
 
-function SectionContent({ section, data }: { section: string; data: PortfolioData }) {
+function SectionContent({
+  data,
+  error,
+  section,
+  uploaded,
+}: {
+  data: PortfolioData;
+  error?: string;
+  section: string;
+  uploaded?: string;
+}) {
   if (!data.family) {
     return <EmptyState text="Для пользователя пока не назначена семья. Нужно добавить запись в family_members." />;
   }
@@ -278,11 +398,13 @@ function SectionContent({ section, data }: { section: string; data: PortfolioDat
   if (section === "import") {
     return (
       <div className="space-y-6">
+        <ImportNotice error={error} uploaded={uploaded} />
+        <ImportUploadForm accounts={data.accounts} />
         <div className="rounded-3xl border border-border bg-surface p-6">
           <p className="text-sm font-medium text-accent">Storage готов</p>
           <h2 className="mt-2 text-xl font-semibold">Private bucket: broker-reports</h2>
           <p className="mt-2 text-sm text-muted">
-            Рекомендуемый путь файла: families/&lbrace;family_id&rbrace;/imports/&lbrace;import_id&rbrace;/filename.pdf
+            Путь файла: families/&lbrace;family_id&rbrace;/imports/&lbrace;import_id&rbrace;/filename.pdf
           </p>
         </div>
         <ImportsView imports={data.imports} />
@@ -294,8 +416,15 @@ function SectionContent({ section, data }: { section: string; data: PortfolioDat
   return <PlaceholderView section={section} />;
 }
 
-export default async function SectionPage({ params }: { params: Promise<{ section: string }> }) {
+export default async function SectionPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ section: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const { section } = await params;
+  const query = (await searchParams) ?? {};
   const current = sections[section];
   if (!current) notFound();
 
@@ -313,7 +442,12 @@ export default async function SectionPage({ params }: { params: Promise<{ sectio
       <h1 className="mt-2 text-3xl font-semibold tracking-tight">{current.title}</h1>
       <p className="mt-3 max-w-2xl text-muted">{current.description}</p>
       <div className="mt-10">
-        <SectionContent data={data} section={section} />
+        <SectionContent
+          data={data}
+          error={queryValue(query.error)}
+          section={section}
+          uploaded={queryValue(query.uploaded)}
+        />
       </div>
       {section === "dashboard" && (
         <div className="mt-8">

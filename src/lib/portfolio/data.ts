@@ -51,7 +51,11 @@ export type Operation = {
 export type ImportJob = {
   id: string;
   family_id: string;
+  account_id: string | null;
   original_file_name: string;
+  storage_object_key: string | null;
+  file_size_bytes: number | null;
+  sha256: string;
   status: string;
   created_at: string;
 };
@@ -134,7 +138,7 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       .limit(5),
     supabase
       .from("imports")
-      .select("id, family_id, original_file_name, status, created_at")
+      .select("id, family_id, account_id, original_file_name, storage_object_key, file_size_bytes, sha256, status, created_at")
       .eq("family_id", family.id)
       .order("created_at", { ascending: false })
       .limit(5),
