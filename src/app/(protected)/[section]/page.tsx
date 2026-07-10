@@ -1,45 +1,18 @@
 import { notFound, redirect } from "next/navigation";
 import { getActiveFamily, getPortfolioData, type Account, type Asset, type ImportJob, type Operation, type PortfolioData } from "@/lib/portfolio/data";
 import { createClient } from "@/lib/supabase/server";
-import { uploadBrokerReport } from "./import-actions";
+import { parseBrokerImport, uploadBrokerReport } from "./import-actions";
 
 const sections: Record<string, { title: string; description: string }> = {
-  dashboard: {
-    title: "Обзор портфеля",
-    description: "Структура семейного портфеля, счета, активы и ближайшие действия.",
-  },
-  accounts: {
-    title: "Счета",
-    description: "Брокерские, банковские и другие счета семьи.",
-  },
-  assets: {
-    title: "Активы",
-    description: "Справочник активов, который будет использоваться в операциях и отчётах.",
-  },
-  import: {
-    title: "Импорт",
-    description: "Загрузка брокерских отчётов и журнал обработки файлов.",
-  },
-  recommendations: {
-    title: "Рекомендации",
-    description: "Сигналы и предложения по управлению портфелем.",
-  },
-  news: {
-    title: "Новости",
-    description: "Новости, связанные с активами портфеля.",
-  },
-  watchlist: {
-    title: "Watchlist",
-    description: "Активы и идеи для наблюдения.",
-  },
-  events: {
-    title: "События",
-    description: "Дивиденды, купоны, погашения и другие события.",
-  },
-  settings: {
-    title: "Настройки",
-    description: "Семья, пользователи, роли, валюты и правила импорта.",
-  },
+  dashboard: { title: "Обзор портфеля", description: "Структура семейного портфеля, счета, активы и ближайшие действия." },
+  accounts: { title: "Счета", description: "Брокерские, банковские и другие счета семьи." },
+  assets: { title: "Активы", description: "Справочник активов, который будет использоваться в операциях и отчётах." },
+  import: { title: "Импорт", description: "Загрузка брокерских отчётов и журнал обработки файлов." },
+  recommendations: { title: "Рекомендации", description: "Сигналы и предложения по управлению портфелем." },
+  news: { title: "Новости", description: "Новости, связанные с активами портфеля." },
+  watchlist: { title: "Watchlist", description: "Активы и идеи для наблюдения." },
+  events: { title: "События", description: "Дивиденды, купоны, погашения и другие события." },
+  settings: { title: "Настройки", description: "Семья, пользователи, роли, валюты и правила импорта." },
 };
 
 export const dynamic = "force-dynamic";
@@ -56,10 +29,10 @@ function statusLabel(status: string) {
     uploaded: "загружен",
     parsing: "парсится",
     parsed: "распознан",
-    applied: "применён",
+    normalized: "нормализован",
     failed: "ошибка",
+    applied: "применён",
   };
-
   return labels[status] ?? status;
 }
 
@@ -72,7 +45,6 @@ function accountTypeLabel(type: string) {
     crypto: "Крипто",
     other: "Другой",
   };
-
   return labels[type] ?? type;
 }
 
@@ -88,7 +60,6 @@ function assetTypeLabel(type: string) {
     real_estate: "Недвижимость",
     other: "Другое",
   };
-
   return labels[type] ?? type;
 }
 
@@ -103,11 +74,7 @@ function queryValue(value: string | string[] | undefined) {
 }
 
 function EmptyState({ text }: { text: string }) {
-  return (
-    <div className="rounded-3xl border border-dashed border-border bg-surface p-8 text-sm text-muted">
-      {text}
-    </div>
-  );
+  return <div className="rounded-3xl border border-dashed border-border bg-surface p-8 text-sm text-muted">{text}</div>;
 }
 
 function MetricCard({ label, value, hint }: { label: string; value: string | number; hint: string }) {
@@ -143,9 +110,7 @@ function DashboardView({ data }: { data: PortfolioData }) {
                     <p className="font-medium">{portfolio.name}</p>
                     <p className="mt-1 text-sm text-muted">{portfolio.description ?? "Без описания"}</p>
                   </div>
-                  <span className="rounded-full bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
-                    {portfolio.base_currency}
-                  </span>
+                  <span className="rounded-full bg-accent/10 px-3 py-1 text-xs font-medium text-accent">{portfolio.base_currency}</span>
                 </div>
               </div>
             ))}
@@ -156,9 +121,9 @@ function DashboardView({ data }: { data: PortfolioData }) {
         <div className="rounded-3xl border border-border bg-surface p-6">
           <h2 className="text-lg font-semibold">Ближайшие действия</h2>
           <ol className="mt-5 space-y-3 text-sm text-muted">
-            <li className="rounded-2xl bg-background p-4">1. Загрузить первый брокерский отчёт в private bucket.</li>
-            <li className="rounded-2xl bg-background p-4">2. Разобрать строки импорта в операции.</li>
-            <li className="rounded-2xl bg-background p-4">3. Построить первые позиции и денежные остатки.</li>
+            <li className="rounded-2xl bg-background p-4">1. Разобрать строки загруженного отчёта.</li>
+            <li className="rounded-2xl bg-background p-4">2. Сверить нормализованные строки.</li>
+            <li className="rounded-2xl bg-background p-4">3. Применить строки в операции портфеля.</li>
           </ol>
         </div>
       </section>
@@ -179,9 +144,7 @@ function AccountsView({ accounts }: { accounts: Account[] }) {
               <h2 className="mt-2 text-xl font-semibold">{account.name}</h2>
               <p className="mt-2 text-sm text-muted">{account.institution_name ?? "Организация не указана"}</p>
             </div>
-            <span className="rounded-full bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
-              {account.currency_code}
-            </span>
+            <span className="rounded-full bg-accent/10 px-3 py-1 text-xs font-medium text-accent">{account.currency_code}</span>
           </div>
           <p className="mt-6 text-xs text-muted">Статус: {statusLabel(account.status)}</p>
         </article>
@@ -222,9 +185,7 @@ function AssetsView({ assets }: { assets: Asset[] }) {
 }
 
 function OperationsView({ operations }: { operations: Operation[] }) {
-  if (operations.length === 0) {
-    return <EmptyState text="Операций пока нет. Они появятся после первого импорта или ручного ввода." />;
-  }
+  if (operations.length === 0) return <EmptyState text="Операций пока нет. Они появятся после применения строк импорта." />;
 
   return (
     <div className="space-y-3">
@@ -251,23 +212,16 @@ function ImportUploadForm({ accounts }: { accounts: Account[] }) {
           <h2 className="mt-2 text-xl font-semibold">Загрузить брокерский отчёт</h2>
           <p className="mt-2 max-w-2xl text-sm text-muted">
             Файл сохранится в private bucket, а в журнале появится запись со статусом “загружен”.
-            Парсинг и разбор строк добавим следующим шагом.
+            Разбор CSV уже доступен; XLSX и PDF подключим следующим шагом.
           </p>
         </div>
-        <span className="rounded-full bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
-          PDF · CSV · XLS · XLSX
-        </span>
+        <span className="rounded-full bg-accent/10 px-3 py-1 text-xs font-medium text-accent">PDF · CSV · XLS · XLSX</span>
       </div>
 
       <div className="mt-6 grid gap-4 md:grid-cols-[1fr_1.4fr_auto] md:items-end">
         <label className="grid gap-2 text-sm">
           <span className="font-medium">Счёт</span>
-          <select
-            className="h-11 rounded-2xl border border-border bg-background px-4"
-            disabled={activeAccounts.length === 0}
-            name="account_id"
-            required
-          >
+          <select className="h-11 rounded-2xl border border-border bg-background px-4" disabled={activeAccounts.length === 0} name="account_id" required>
             <option value="">Выберите счёт</option>
             {activeAccounts.map((account) => (
               <option key={account.id} value={account.id}>
@@ -288,11 +242,7 @@ function ImportUploadForm({ accounts }: { accounts: Account[] }) {
           />
         </label>
 
-        <button
-          className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={activeAccounts.length === 0}
-          type="submit"
-        >
+        <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={activeAccounts.length === 0} type="submit">
           Загрузить
         </button>
       </div>
@@ -300,7 +250,7 @@ function ImportUploadForm({ accounts }: { accounts: Account[] }) {
   );
 }
 
-function ImportNotice({ error, uploaded }: { error?: string; uploaded?: string }) {
+function ImportNotice({ error, parsed, parseError, uploaded }: { error?: string; parsed?: string; parseError?: string; uploaded?: string }) {
   const errors: Record<string, string> = {
     "no-family": "Для пользователя не назначена семья.",
     forbidden: "У роли viewer нет права загружать отчёты.",
@@ -311,47 +261,96 @@ function ImportNotice({ error, uploaded }: { error?: string; uploaded?: string }
     "file-type": "Поддерживаются только PDF, CSV, XLS и XLSX.",
     duplicate: "Такой файл уже загружался для выбранного счёта.",
   };
+  const parseErrors: Record<string, string> = {
+    "no-family": "Для пользователя не назначена семья.",
+    forbidden: "У роли viewer нет права разбирать отчёты.",
+    "import-required": "Не выбран импорт для разбора.",
+    "import-not-found": "Импорт не найден или недоступен.",
+    "csv-only": "Сейчас поддержан разбор только CSV. XLSX и PDF добавим следующим шагом.",
+    "download-failed": "Не удалось скачать файл из private bucket.",
+    "empty-csv": "В CSV нет строк данных.",
+    "row-validation": "Файл разобран, но часть строк не прошла базовую проверку.",
+  };
 
-  if (uploaded) {
-    return (
-      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-        Файл загружен, запись импорта создана.
-      </div>
-    );
-  }
-
+  if (uploaded) return <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">Файл загружен, запись импорта создана.</div>;
+  if (parsed) return <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">CSV разобран, строки импорта сохранены.</div>;
+  if (parseError) return <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">{parseErrors[parseError] ?? "Не удалось разобрать файл."}</div>;
   if (!error) return null;
-
-  return (
-    <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">
-      {errors[error] ?? "Не удалось загрузить файл."}
-    </div>
-  );
+  return <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">{errors[error] ?? "Не удалось загрузить файл."}</div>;
 }
 
-function ImportsView({ imports }: { imports: ImportJob[] }) {
-  if (imports.length === 0) {
-    return <EmptyState text="Файлы ещё не загружались. Контур импорта и private bucket уже готовы." />;
-  }
+function normalizedPreview(value: Record<string, unknown> | null) {
+  if (!value) return "—";
+  const parts = [value.trade_date, value.operation_type, value.ticker, value.quantity, value.price, value.currency]
+    .filter((item) => item !== null && item !== undefined && item !== "");
+  return parts.length > 0 ? parts.join(" · ") : "—";
+}
+
+function canParseCsv(importJob: ImportJob) {
+  return importJob.original_file_name.toLowerCase().endsWith(".csv")
+    && ["uploaded", "parsed", "failed"].includes(importJob.status);
+}
+
+function ImportsView({ data }: { data: PortfolioData }) {
+  if (data.imports.length === 0) return <EmptyState text="Файлы ещё не загружались. Контур импорта и private bucket уже готовы." />;
 
   return (
     <div className="space-y-3">
-      {imports.map((importJob) => (
-        <div className="rounded-2xl border border-border bg-surface p-4" key={importJob.id}>
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <p className="font-medium">{importJob.original_file_name}</p>
-              <p className="mt-1 text-sm text-muted">
-                Статус: {statusLabel(importJob.status)} · {formatFileSize(importJob.file_size_bytes)}
-              </p>
-              <p className="mt-2 break-all text-xs text-muted">{importJob.storage_object_key}</p>
+      {data.imports.map((importJob) => {
+        const rows = data.importRows.filter((row) => row.import_id === importJob.id);
+
+        return (
+          <div className="rounded-2xl border border-border bg-surface p-4" key={importJob.id}>
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <p className="font-medium">{importJob.original_file_name}</p>
+                <p className="mt-1 text-sm text-muted">
+                  Статус: {statusLabel(importJob.status)} · {formatFileSize(importJob.file_size_bytes)}
+                </p>
+                <p className="mt-2 break-all text-xs text-muted">{importJob.storage_object_key}</p>
+              </div>
+              <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">SHA-256: {importJob.sha256.slice(0, 10)}…</span>
             </div>
-            <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">
-              SHA-256: {importJob.sha256.slice(0, 10)}…
-            </span>
+
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              {canParseCsv(importJob) && (
+                <form action={parseBrokerImport}>
+                  <input name="import_id" type="hidden" value={importJob.id} />
+                  <button className="rounded-2xl bg-accent px-4 py-2 text-xs font-medium text-white" type="submit">
+                    Разобрать CSV
+                  </button>
+                </form>
+              )}
+              {rows.length > 0 && <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">Строк: {rows.length}</span>}
+            </div>
+
+            {rows.length > 0 && (
+              <div className="mt-4 overflow-hidden rounded-2xl border border-border bg-background">
+                <table className="w-full min-w-[720px] text-left text-xs">
+                  <thead className="border-b border-border text-muted">
+                    <tr>
+                      <th className="px-4 py-3 font-medium">Строка</th>
+                      <th className="px-4 py-3 font-medium">Статус</th>
+                      <th className="px-4 py-3 font-medium">Нормализация</th>
+                      <th className="px-4 py-3 font-medium">Ошибка</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row) => (
+                      <tr className="border-b border-border last:border-0" key={row.id}>
+                        <td className="px-4 py-3">{row.row_number}</td>
+                        <td className="px-4 py-3">{statusLabel(row.status)}</td>
+                        <td className="px-4 py-3 text-muted">{normalizedPreview(row.normalized_data)}</td>
+                        <td className="px-4 py-3 text-muted">{row.error_message ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -373,24 +372,25 @@ function PlaceholderView({ section }: { section: string }) {
     watchlist: "Watchlist логично строить после справочника активов и первых рыночных источников.",
     events: "События будут связаны с активами: дивиденды, купоны, погашения и корпоративные действия.",
   };
-
   return <EmptyState text={details[section] ?? "Раздел подготовлен, данные подключим на следующем шаге."} />;
 }
 
 function SectionContent({
   data,
   error,
+  parsed,
+  parseError,
   section,
   uploaded,
 }: {
   data: PortfolioData;
   error?: string;
+  parsed?: string;
+  parseError?: string;
   section: string;
   uploaded?: string;
 }) {
-  if (!data.family) {
-    return <EmptyState text="Для пользователя пока не назначена семья. Нужно добавить запись в family_members." />;
-  }
+  if (!data.family) return <EmptyState text="Для пользователя пока не назначена семья. Нужно добавить запись в family_members." />;
 
   if (section === "dashboard") return <DashboardView data={data} />;
   if (section === "accounts") return <AccountsView accounts={data.accounts} />;
@@ -398,21 +398,18 @@ function SectionContent({
   if (section === "import") {
     return (
       <div className="space-y-6">
-        <ImportNotice error={error} uploaded={uploaded} />
+        <ImportNotice error={error} parsed={parsed} parseError={parseError} uploaded={uploaded} />
         <ImportUploadForm accounts={data.accounts} />
         <div className="rounded-3xl border border-border bg-surface p-6">
           <p className="text-sm font-medium text-accent">Storage готов</p>
           <h2 className="mt-2 text-xl font-semibold">Private bucket: broker-reports</h2>
-          <p className="mt-2 text-sm text-muted">
-            Путь файла: families/&lbrace;family_id&rbrace;/imports/&lbrace;import_id&rbrace;/filename.pdf
-          </p>
+          <p className="mt-2 text-sm text-muted">Путь файла: families/&lbrace;family_id&rbrace;/imports/&lbrace;import_id&rbrace;/filename.pdf</p>
         </div>
-        <ImportsView imports={data.imports} />
+        <ImportsView data={data} />
       </div>
     );
   }
   if (section === "settings") return <SettingsView data={data} />;
-
   return <PlaceholderView section={section} />;
 }
 
@@ -445,6 +442,8 @@ export default async function SectionPage({
         <SectionContent
           data={data}
           error={queryValue(query.error)}
+          parsed={queryValue(query.parsed)}
+          parseError={queryValue(query.parse_error)}
           section={section}
           uploaded={queryValue(query.uploaded)}
         />

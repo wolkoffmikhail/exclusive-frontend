@@ -60,6 +60,18 @@ export type ImportJob = {
   created_at: string;
 };
 
+export type ImportRow = {
+  id: string;
+  family_id: string;
+  import_id: string;
+  row_number: number;
+  raw_data: Record<string, unknown>;
+  normalized_data: Record<string, unknown> | null;
+  status: string;
+  error_message: string | null;
+  created_at: string;
+};
+
 export type PortfolioData = {
   family: ActiveFamily | null;
   portfolios: Portfolio[];
@@ -67,6 +79,7 @@ export type PortfolioData = {
   assets: Asset[];
   operations: Operation[];
   imports: ImportJob[];
+  importRows: ImportRow[];
 };
 
 type FamilyMemberRow = {
@@ -111,10 +124,11 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       assets: [],
       operations: [],
       imports: [],
+      importRows: [],
     };
   }
 
-  const [portfolios, accounts, assets, operations, imports] = await Promise.all([
+  const [portfolios, accounts, assets, operations, imports, importRows] = await Promise.all([
     supabase
       .from("portfolios")
       .select("id, family_id, name, base_currency, status, description, created_at")
@@ -142,6 +156,12 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       .eq("family_id", family.id)
       .order("created_at", { ascending: false })
       .limit(5),
+    supabase
+      .from("import_rows")
+      .select("id, family_id, import_id, row_number, raw_data, normalized_data, status, error_message, created_at")
+      .eq("family_id", family.id)
+      .order("row_number", { ascending: true })
+      .limit(20),
   ]);
 
   return {
@@ -151,5 +171,6 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
     assets: rows<Asset>(assets.data),
     operations: rows<Operation>(operations.data),
     imports: rows<ImportJob>(imports.data),
+    importRows: rows<ImportRow>(importRows.data),
   };
 }
