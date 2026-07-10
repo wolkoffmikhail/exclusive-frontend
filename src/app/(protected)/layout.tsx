@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Bell, BriefcaseBusiness, LogOut } from "lucide-react";
+import { getActiveFamily } from "@/lib/portfolio/data";
 import { createClient } from "@/lib/supabase/server";
 import { signOut } from "./actions";
 
@@ -24,20 +25,7 @@ export default async function ProtectedLayout({ children }: { children: React.Re
   const userId = claimsData?.claims?.sub;
   if (!userId) redirect("/login");
 
-  const { data: membership } = await supabase
-    .from("family_members")
-    .select("family_id, role, families(name)")
-    .eq("user_id", userId)
-    .limit(1)
-    .maybeSingle();
-
-  const family = Array.isArray(membership?.families)
-    ? membership.families[0]
-    : membership?.families;
-  const familyName =
-    family && typeof family === "object" && "name" in family
-      ? String(family.name)
-      : "Семья не назначена";
+  const family = await getActiveFamily(supabase, userId);
 
   return (
     <div className="min-h-screen lg:grid lg:grid-cols-[260px_1fr]">
@@ -50,7 +38,11 @@ export default async function ProtectedLayout({ children }: { children: React.Re
         </Link>
         <nav className="mt-10 grid grid-cols-2 gap-1 sm:grid-cols-3 lg:grid-cols-1">
           {navigation.map(([slug, label]) => (
-            <Link className="rounded-xl px-3 py-2.5 text-sm text-white/70 transition hover:bg-white/10 hover:text-white" href={`/${slug}`} key={slug}>
+            <Link
+              className="rounded-xl px-3 py-2.5 text-sm text-white/70 transition hover:bg-white/10 hover:text-white"
+              href={`/${slug}`}
+              key={slug}
+            >
               {label}
             </Link>
           ))}
@@ -60,7 +52,7 @@ export default async function ProtectedLayout({ children }: { children: React.Re
         <header className="flex h-20 items-center justify-between border-b border-border bg-surface px-6 lg:px-10">
           <div>
             <p className="text-xs text-muted">Активная семья</p>
-            <p className="font-medium">{familyName}</p>
+            <p className="font-medium">{family?.name ?? "Семья не назначена"}</p>
           </div>
           <div className="flex items-center gap-2">
             <button aria-label="Уведомления" className="rounded-full border border-border p-2.5">
