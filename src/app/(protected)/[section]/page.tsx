@@ -1,5 +1,5 @@
 import { notFound, redirect } from "next/navigation";
-import { getActiveFamily, getPortfolioData, type Account, type Asset, type ImportJob, type Operation, type PortfolioData } from "@/lib/portfolio/data";
+import { getActiveFamily, getPortfolioData, type Account, type ImportJob, type Operation, type PortfolioData, type Position } from "@/lib/portfolio/data";
 import { createClient } from "@/lib/supabase/server";
 import { applyBrokerImport, parseBrokerImport, uploadBrokerReport } from "./import-actions";
 
@@ -73,6 +73,21 @@ function queryValue(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function formatNumber(value: number | string | null | undefined, digits = 2) {
+  const number = typeof value === "number" ? value : Number(value ?? 0);
+  if (!Number.isFinite(number)) return "—";
+  return new Intl.NumberFormat("ru-RU", {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: number % 1 === 0 ? 0 : Math.min(2, digits),
+  }).format(number);
+}
+
+function formatMoney(value: number | string | null | undefined, currency = "RUB") {
+  const number = typeof value === "number" ? value : Number(value ?? 0);
+  if (!Number.isFinite(number)) return "—";
+  return `${formatNumber(number, 2)} ${currency}`;
+}
+
 function EmptyState({ text }: { text: string }) {
   return <div className="rounded-3xl border border-dashed border-border bg-surface p-8 text-sm text-muted">{text}</div>;
 }
@@ -89,14 +104,16 @@ function MetricCard({ label, value, hint }: { label: string; value: string | num
 
 function DashboardView({ data }: { data: PortfolioData }) {
   const activeAccounts = data.accounts.filter((account) => account.status === "active").length;
+  const positionsValue = data.positions.reduce((total, position) => total + position.book_value, 0);
 
   return (
     <div className="space-y-8">
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-5">
         <MetricCard label="Портфели" value={data.portfolios.length} hint={`Базовая валюта: ${data.family?.baseCurrency ?? "—"}`} />
         <MetricCard label="Счета" value={activeAccounts} hint="Активные счета в семье" />
         <MetricCard label="Активы" value={data.assets.length} hint="Стартовый справочник" />
-        <MetricCard label="Операции" value={data.operations.length} hint="Пока ждём первый импорт" />
+        <MetricCard label="Позиции" value={data.positions.length} hint={formatMoney(positionsValue, data.family?.baseCurrency ?? "RUB")} />
+        <MetricCard label="Операции" value={data.operationCount} hint="Применённые строки импорта" />
       </div>
 
       <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
@@ -121,12 +138,14 @@ function DashboardView({ data }: { data: PortfolioData }) {
         <div className="rounded-3xl border border-border bg-surface p-6">
           <h2 className="text-lg font-semibold">Ближайшие действия</h2>
           <ol className="mt-5 space-y-3 text-sm text-muted">
-            <li className="rounded-2xl bg-background p-4">1. Разобрать строки загруженного отчёта.</li>
-            <li className="rounded-2xl bg-background p-4">2. Сверить нормализованные строки.</li>
-            <li className="rounded-2xl bg-background p-4">3. Применить строки в операции портфеля.</li>
+            <li className="rounded-2xl bg-background p-4">1. Загрузить ещё один отчёт для проверки нескольких операций.</li>
+            <li className="rounded-2xl bg-background p-4">2. Сверить позиции по активам и счетам.</li>
+            <li className="rounded-2xl bg-background p-4">3. Подключить рыночные цены для оценки портфеля.</li>
           </ol>
         </div>
       </section>
+
+      <PositionsView positions={data.positions} />
     </div>
   );
 }
@@ -153,33 +172,81 @@ function AccountsView({ accounts }: { accounts: Account[] }) {
   );
 }
 
-function AssetsView({ assets }: { assets: Asset[] }) {
-  if (assets.length === 0) return <EmptyState text="Активы пока не созданы." />;
+function PositionsView({ positions }: { positions: Position[] }) {
+  if (positions.length === 0) return <EmptyState text="Позиции пока не сформированы. Они появятся после применения операций покупки/продажи." />;
 
   return (
     <div className="overflow-hidden rounded-3xl border border-border bg-surface">
-      <table className="w-full min-w-[680px] text-left text-sm">
+      <div className="border-b border-border p-6">
+        <h2 className="text-lg font-semibold">Текущие позиции</h2>
+        <p className="mt-2 text-sm text-muted">Расчёт строится из применённых операций: покупки увеличивают количество, продажи уменьшают.</p>
+      </div>
+      <table className="w-full min-w-[860px] text-left text-sm">
         <thead className="border-b border-border text-muted">
           <tr>
             <th className="px-5 py-4 font-medium">Актив</th>
-            <th className="px-5 py-4 font-medium">Тип</th>
-            <th className="px-5 py-4 font-medium">Тикер</th>
-            <th className="px-5 py-4 font-medium">Рынок</th>
-            <th className="px-5 py-4 font-medium">Валюта</th>
+            <th className="px-5 py-4 font-medium">Счёт</th>
+            <th className="px-5 py-4 font-medium">Количество</th>
+            <th className="px-5 py-4 font-medium">Средняя цена</th>
+            <th className="px-5 py-4 font-medium">Балансовая стоимость</th>
+            <th className="px-5 py-4 font-medium">Денежный эффект</th>
           </tr>
         </thead>
         <tbody>
-          {assets.map((asset) => (
-            <tr className="border-b border-border last:border-0" key={asset.id}>
-              <td className="px-5 py-4 font-medium">{asset.name}</td>
-              <td className="px-5 py-4 text-muted">{assetTypeLabel(asset.asset_type_code)}</td>
-              <td className="px-5 py-4 text-muted">{asset.ticker ?? "—"}</td>
-              <td className="px-5 py-4 text-muted">{asset.market ?? "—"}</td>
-              <td className="px-5 py-4 text-muted">{asset.currency_code ?? "—"}</td>
+          {positions.map((position) => (
+            <tr className="border-b border-border last:border-0" key={position.id}>
+              <td className="px-5 py-4">
+                <p className="font-medium">{position.asset_name}</p>
+                <p className="mt-1 text-xs text-muted">{position.ticker ?? "—"}</p>
+              </td>
+              <td className="px-5 py-4 text-muted">{position.account_name}</td>
+              <td className="px-5 py-4 font-medium">{formatNumber(position.quantity, 6)}</td>
+              <td className="px-5 py-4 text-muted">{position.average_price === null ? "—" : formatMoney(position.average_price, position.currency_code)}</td>
+              <td className="px-5 py-4 font-medium">{formatMoney(position.book_value, position.currency_code)}</td>
+              <td className="px-5 py-4 text-muted">{formatMoney(position.net_cash_flow, position.currency_code)}</td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function AssetsView({ data }: { data: PortfolioData }) {
+  const { assets, positions } = data;
+  if (assets.length === 0) return <EmptyState text="Активы пока не созданы." />;
+
+  return (
+    <div className="space-y-6">
+      <PositionsView positions={positions} />
+      <div className="overflow-hidden rounded-3xl border border-border bg-surface">
+        <div className="border-b border-border p-6">
+          <h2 className="text-lg font-semibold">Справочник активов</h2>
+          <p className="mt-2 text-sm text-muted">Все активы семьи, включая те, по которым пока нет открытой позиции.</p>
+        </div>
+        <table className="w-full min-w-[680px] text-left text-sm">
+          <thead className="border-b border-border text-muted">
+            <tr>
+              <th className="px-5 py-4 font-medium">Актив</th>
+              <th className="px-5 py-4 font-medium">Тип</th>
+              <th className="px-5 py-4 font-medium">Тикер</th>
+              <th className="px-5 py-4 font-medium">Рынок</th>
+              <th className="px-5 py-4 font-medium">Валюта</th>
+            </tr>
+          </thead>
+          <tbody>
+            {assets.map((asset) => (
+              <tr className="border-b border-border last:border-0" key={asset.id}>
+                <td className="px-5 py-4 font-medium">{asset.name}</td>
+                <td className="px-5 py-4 text-muted">{assetTypeLabel(asset.asset_type_code)}</td>
+                <td className="px-5 py-4 text-muted">{asset.ticker ?? "—"}</td>
+                <td className="px-5 py-4 text-muted">{asset.market ?? "—"}</td>
+                <td className="px-5 py-4 text-muted">{asset.currency_code ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -436,7 +503,7 @@ function SectionContent({
 
   if (section === "dashboard") return <DashboardView data={data} />;
   if (section === "accounts") return <AccountsView accounts={data.accounts} />;
-  if (section === "assets") return <AssetsView assets={data.assets} />;
+  if (section === "assets") return <AssetsView data={data} />;
   if (section === "import") {
     return (
       <div className="space-y-6">
