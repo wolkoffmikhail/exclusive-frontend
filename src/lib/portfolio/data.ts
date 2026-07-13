@@ -58,6 +58,7 @@ export type Operation = {
 export type Position = {
   id: string;
   family_id: string;
+  portfolio_id: string;
   account_id: string;
   account_name: string;
   asset_id: string | null;
@@ -67,8 +68,26 @@ export type Position = {
   quantity: number;
   average_price: number | null;
   book_value: number;
+  market_price: number | null;
+  market_value: number | null;
+  unrealized_pnl: number | null;
+  valuation_date: string | null;
   net_cash_flow: number;
   currency_code: string;
+};
+
+export type PositionSnapshot = {
+  id: string;
+  family_id: string;
+  portfolio_id: string;
+  account_id: string | null;
+  asset_id: string;
+  snapshot_date: string;
+  quantity: number | string;
+  book_value_amount: number | string | null;
+  market_value_amount: number | string | null;
+  currency_code: string;
+  source: string;
 };
 
 export type ImportJob = {
@@ -155,7 +174,7 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
     };
   }
 
-  const [portfolios, accounts, assets, operations, imports, importRows] = await Promise.all([
+  const [portfolios, accounts, assets, operations, positionSnapshots, imports, importRows] = await Promise.all([
     supabase
       .from("portfolios")
       .select("id, family_id, name, base_currency, status, description, created_at")
@@ -178,6 +197,12 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       .order("trade_date", { ascending: false })
       .limit(500),
     supabase
+      .from("position_snapshots")
+      .select("id, family_id, portfolio_id, account_id, asset_id, snapshot_date, quantity, book_value_amount, market_value_amount, currency_code, source")
+      .eq("family_id", family.id)
+      .order("snapshot_date", { ascending: false })
+      .limit(500),
+    supabase
       .from("imports")
       .select("id, family_id, account_id, original_file_name, storage_object_key, file_size_bytes, sha256, status, created_at")
       .eq("family_id", family.id)
@@ -194,6 +219,7 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
   const operationRows = rows<Operation>(operations.data);
   const accountRows = rows<Account>(accounts.data);
   const assetRows = rows<Asset>(assets.data);
+  const snapshotRows = rows<PositionSnapshot>(positionSnapshots.data);
 
   return {
     family,
@@ -202,7 +228,7 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
     assets: assetRows,
     operations: operationRows.slice(0, 5),
     operationCount: operationRows.length,
-    positions: calculatePositions(operationRows, accountRows, assetRows, family.id),
+    positions: calculatePositions(operationRows, accountRows, assetRows, snapshotRows, family.id),
     imports: rows<ImportJob>(imports.data),
     importRows: rows<ImportRow>(importRows.data),
   };
@@ -223,9 +249,29 @@ function positionQuantitySign(operationType: string) {
   return 0;
 }
 
-function calculatePositions(operations: Operation[], accounts: Account[], assets: Asset[], familyId: string): Position[] {
+function snapshotKey(portfolioId: string, accountId: string, assetId: string, currencyCode: string) {
+  return `${portfolioId}:${accountId}:${assetId}:${currencyCode}`;
+}
+
+function latestSnapshotsByPosition(snapshots: PositionSnapshot[]) {
+  const snapshotsByKey = new Map<string, PositionSnapshot>();
+
+  for (const snapshot of snapshots) {
+    if (!snapshot.account_id) continue;
+    const key = snapshotKey(snapshot.portfolio_id, snapshot.account_id, snapshot.asset_id, snapshot.currency_code);
+    const existing = snapshotsByKey.get(key);
+    if (!existing || snapshot.snapshot_date > existing.snapshot_date) {
+      snapshotsByKey.set(key, snapshot);
+    }
+  }
+
+  return snapshotsByKey;
+}
+
+function calculatePositions(operations: Operation[], accounts: Account[], assets: Asset[], snapshots: PositionSnapshot[], familyId: string): Position[] {
   const accountById = new Map(accounts.map((account) => [account.id, account]));
   const assetById = new Map(assets.map((asset) => [asset.id, asset]));
+  const snapshotByKey = latestSnapshotsByPosition(snapshots);
   const grouped = new Map<string, Position & { boughtQuantity: number; buyCost: number }>();
 
   for (const operation of operations) {
@@ -236,10 +282,12 @@ function calculatePositions(operations: Operation[], accounts: Account[], assets
 
     const asset = operation.asset_id ? assetById.get(operation.asset_id) : null;
     const account = accountById.get(operation.account_id);
-    const key = `${operation.account_id}:${operation.asset_id}:${operation.currency_code}`;
+    const portfolioId = account?.portfolio_id ?? "";
+    const key = snapshotKey(portfolioId, operation.account_id, operation.asset_id ?? "", operation.currency_code);
     const existing = grouped.get(key) ?? {
       id: key,
       family_id: familyId,
+      portfolio_id: portfolioId,
       account_id: operation.account_id,
       account_name: account?.name ?? "Счёт не найден",
       asset_id: operation.asset_id,
@@ -249,6 +297,10 @@ function calculatePositions(operations: Operation[], accounts: Account[], assets
       quantity: 0,
       average_price: null,
       book_value: 0,
+      market_price: null,
+      market_value: null,
+      unrealized_pnl: null,
+      valuation_date: null,
       net_cash_flow: 0,
       currency_code: operation.currency_code,
       boughtQuantity: 0,
@@ -281,8 +333,13 @@ function calculatePositions(operations: Operation[], accounts: Account[], assets
     .filter((position) => Math.abs(position.quantity) > 0.0000001)
     .sort((left, right) => left.asset_name.localeCompare(right.asset_name, "ru"))
     .map((position) => ({
+      ...position,
+      ...marketValuation(position, snapshotByKey.get(snapshotKey(position.portfolio_id, position.account_id, position.asset_id ?? "", position.currency_code))),
+    }))
+    .map((position) => ({
       id: position.id,
       family_id: position.family_id,
+      portfolio_id: position.portfolio_id,
       account_id: position.account_id,
       account_name: position.account_name,
       asset_id: position.asset_id,
@@ -292,7 +349,24 @@ function calculatePositions(operations: Operation[], accounts: Account[], assets
       quantity: position.quantity,
       average_price: position.average_price,
       book_value: position.book_value,
+      market_price: position.market_price,
+      market_value: position.market_value,
+      unrealized_pnl: position.unrealized_pnl,
+      valuation_date: position.valuation_date,
       net_cash_flow: position.net_cash_flow,
       currency_code: position.currency_code,
     }));
+}
+
+function marketValuation(position: Position, snapshot: PositionSnapshot | undefined) {
+  const marketValue = snapshot?.market_value_amount == null ? null : toNumber(snapshot.market_value_amount);
+  const quantity = Math.abs(position.quantity);
+  const marketPrice = marketValue !== null && quantity > 0 ? marketValue / quantity : null;
+
+  return {
+    market_price: marketPrice,
+    market_value: marketValue,
+    unrealized_pnl: marketValue === null ? null : marketValue - position.book_value,
+    valuation_date: snapshot?.snapshot_date ?? null,
+  };
 }

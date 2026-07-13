@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { getActiveFamily, getPortfolioData, type Account, type ImportJob, type Operation, type PortfolioData, type Position } from "@/lib/portfolio/data";
 import { createClient } from "@/lib/supabase/server";
 import { applyBrokerImport, parseBrokerImport, uploadBrokerReport } from "./import-actions";
+import { saveManualPositionPrice } from "./position-actions";
 
 const sections: Record<string, { title: string; description: string }> = {
   dashboard: { title: "Обзор портфеля", description: "Структура семейного портфеля, счета, активы и ближайшие действия." },
@@ -88,6 +89,17 @@ function formatMoney(value: number | string | null | undefined, currency = "RUB"
   return `${formatNumber(number, 2)} ${currency}`;
 }
 
+function formatSignedMoney(value: number | string | null | undefined, currency = "RUB") {
+  const number = typeof value === "number" ? value : Number(value ?? 0);
+  if (!Number.isFinite(number)) return "—";
+  const sign = number > 0 ? "+" : "";
+  return `${sign}${formatMoney(number, currency)}`;
+}
+
+function todayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function EmptyState({ text }: { text: string }) {
   return <div className="rounded-3xl border border-dashed border-border bg-surface p-8 text-sm text-muted">{text}</div>;
 }
@@ -104,7 +116,8 @@ function MetricCard({ label, value, hint }: { label: string; value: string | num
 
 function DashboardView({ data }: { data: PortfolioData }) {
   const activeAccounts = data.accounts.filter((account) => account.status === "active").length;
-  const positionsValue = data.positions.reduce((total, position) => total + position.book_value, 0);
+  const positionsValue = data.positions.reduce((total, position) => total + (position.market_value ?? position.book_value), 0);
+  const positionsPnl = data.positions.reduce((total, position) => total + (position.unrealized_pnl ?? 0), 0);
 
   return (
     <div className="space-y-8">
@@ -113,7 +126,7 @@ function DashboardView({ data }: { data: PortfolioData }) {
         <MetricCard label="Счета" value={activeAccounts} hint="Активные счета в семье" />
         <MetricCard label="Активы" value={data.assets.length} hint="Стартовый справочник" />
         <MetricCard label="Позиции" value={data.positions.length} hint={formatMoney(positionsValue, data.family?.baseCurrency ?? "RUB")} />
-        <MetricCard label="Операции" value={data.operationCount} hint="Применённые строки импорта" />
+        <MetricCard label="P&L" value={formatSignedMoney(positionsPnl, data.family?.baseCurrency ?? "RUB")} hint="По ручным рыночным ценам" />
       </div>
 
       <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
@@ -172,16 +185,33 @@ function AccountsView({ accounts }: { accounts: Account[] }) {
   );
 }
 
+function PriceNotice({ priceError, priced }: { priceError?: string; priced?: string }) {
+  const priceErrors: Record<string, string> = {
+    "no-family": "Для пользователя не назначена семья.",
+    forbidden: "У роли viewer нет права сохранять цены.",
+    "position-required": "Не выбрана позиция для оценки.",
+    "position-not-found": "Позиция не найдена или уже закрыта.",
+    "price-required": "Введите положительную цену.",
+    "date-required": "Введите дату оценки в формате YYYY-MM-DD.",
+  };
+
+  if (priced) return <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">Рыночная цена сохранена, оценка позиции обновлена.</div>;
+  if (priceError) return <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">{priceErrors[priceError] ?? "Не удалось сохранить рыночную цену."}</div>;
+  return null;
+}
+
 function PositionsView({ positions }: { positions: Position[] }) {
   if (positions.length === 0) return <EmptyState text="Позиции пока не сформированы. Они появятся после применения операций покупки/продажи." />;
+
+  const defaultDate = todayIsoDate();
 
   return (
     <div className="overflow-hidden rounded-3xl border border-border bg-surface">
       <div className="border-b border-border p-6">
         <h2 className="text-lg font-semibold">Текущие позиции</h2>
-        <p className="mt-2 text-sm text-muted">Расчёт строится из применённых операций: покупки увеличивают количество, продажи уменьшают.</p>
+        <p className="mt-2 text-sm text-muted">Расчёт строится из операций и последней ручной рыночной оценки, если она сохранена.</p>
       </div>
-      <table className="w-full min-w-[860px] text-left text-sm">
+      <table className="w-full min-w-[1180px] text-left text-sm">
         <thead className="border-b border-border text-muted">
           <tr>
             <th className="px-5 py-4 font-medium">Актив</th>
@@ -189,7 +219,10 @@ function PositionsView({ positions }: { positions: Position[] }) {
             <th className="px-5 py-4 font-medium">Количество</th>
             <th className="px-5 py-4 font-medium">Средняя цена</th>
             <th className="px-5 py-4 font-medium">Балансовая стоимость</th>
-            <th className="px-5 py-4 font-medium">Денежный эффект</th>
+            <th className="px-5 py-4 font-medium">Текущая цена</th>
+            <th className="px-5 py-4 font-medium">Рыночная стоимость</th>
+            <th className="px-5 py-4 font-medium">P&L</th>
+            <th className="px-5 py-4 font-medium">Обновить цену</th>
           </tr>
         </thead>
         <tbody>
@@ -203,7 +236,43 @@ function PositionsView({ positions }: { positions: Position[] }) {
               <td className="px-5 py-4 font-medium">{formatNumber(position.quantity, 6)}</td>
               <td className="px-5 py-4 text-muted">{position.average_price === null ? "—" : formatMoney(position.average_price, position.currency_code)}</td>
               <td className="px-5 py-4 font-medium">{formatMoney(position.book_value, position.currency_code)}</td>
-              <td className="px-5 py-4 text-muted">{formatMoney(position.net_cash_flow, position.currency_code)}</td>
+              <td className="px-5 py-4 text-muted">{position.market_price === null ? "—" : formatMoney(position.market_price, position.currency_code)}</td>
+              <td className="px-5 py-4 font-medium">{position.market_value === null ? "—" : formatMoney(position.market_value, position.currency_code)}</td>
+              <td className={position.unrealized_pnl !== null && position.unrealized_pnl >= 0 ? "px-5 py-4 text-emerald-700" : "px-5 py-4 text-red-700"}>
+                {position.unrealized_pnl === null ? "—" : formatSignedMoney(position.unrealized_pnl, position.currency_code)}
+                {position.valuation_date && <span className="mt-1 block text-xs text-muted">{position.valuation_date}</span>}
+              </td>
+              <td className="px-5 py-4">
+                {position.asset_id ? (
+                  <form action={saveManualPositionPrice} className="grid min-w-52 gap-2">
+                    <input name="account_id" type="hidden" value={position.account_id} />
+                    <input name="asset_id" type="hidden" value={position.asset_id} />
+                    <input name="currency_code" type="hidden" value={position.currency_code} />
+                    <div className="flex gap-2">
+                      <input
+                        className="h-9 w-24 rounded-xl border border-border bg-background px-3 text-xs"
+                        defaultValue={position.market_price ?? position.average_price ?? ""}
+                        min="0.0000001"
+                        name="market_price"
+                        placeholder="Цена"
+                        required
+                        step="0.0000001"
+                        type="number"
+                      />
+                      <input
+                        className="h-9 w-32 rounded-xl border border-border bg-background px-3 text-xs"
+                        defaultValue={position.valuation_date ?? defaultDate}
+                        name="snapshot_date"
+                        required
+                        type="date"
+                      />
+                    </div>
+                    <button className="h-9 rounded-xl bg-accent px-3 text-xs font-medium text-white" type="submit">
+                      Сохранить
+                    </button>
+                  </form>
+                ) : "—"}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -212,12 +281,13 @@ function PositionsView({ positions }: { positions: Position[] }) {
   );
 }
 
-function AssetsView({ data }: { data: PortfolioData }) {
+function AssetsView({ data, priceError, priced }: { data: PortfolioData; priceError?: string; priced?: string }) {
   const { assets, positions } = data;
   if (assets.length === 0) return <EmptyState text="Активы пока не созданы." />;
 
   return (
     <div className="space-y-6">
+      <PriceNotice priceError={priceError} priced={priced} />
       <PositionsView positions={positions} />
       <div className="overflow-hidden rounded-3xl border border-border bg-surface">
         <div className="border-b border-border p-6">
@@ -485,6 +555,8 @@ function SectionContent({
   applyError,
   data,
   error,
+  priced,
+  priceError,
   parsed,
   parseError,
   section,
@@ -494,6 +566,8 @@ function SectionContent({
   applyError?: string;
   data: PortfolioData;
   error?: string;
+  priced?: string;
+  priceError?: string;
   parsed?: string;
   parseError?: string;
   section: string;
@@ -503,7 +577,7 @@ function SectionContent({
 
   if (section === "dashboard") return <DashboardView data={data} />;
   if (section === "accounts") return <AccountsView accounts={data.accounts} />;
-  if (section === "assets") return <AssetsView data={data} />;
+  if (section === "assets") return <AssetsView data={data} priceError={priceError} priced={priced} />;
   if (section === "import") {
     return (
       <div className="space-y-6">
@@ -553,6 +627,8 @@ export default async function SectionPage({
           applyError={queryValue(query.apply_error)}
           data={data}
           error={queryValue(query.error)}
+          priced={queryValue(query.priced)}
+          priceError={queryValue(query.price_error)}
           parsed={queryValue(query.parsed)}
           parseError={queryValue(query.parse_error)}
           section={section}
