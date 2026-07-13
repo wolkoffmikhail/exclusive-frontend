@@ -183,6 +183,8 @@ type NormalizedImportRow = {
   security_identifier?: unknown;
   custody_place?: unknown;
   notes?: unknown;
+  rate_date?: unknown;
+  rate_to_rub?: unknown;
 };
 
 const supportedOperationTypes = new Set([
@@ -578,6 +580,72 @@ export async function applyBrokerImport(formData: FormData) {
   for (const row of rowsToApply) {
     const normalized = (row.normalized_data ?? {}) as NormalizedImportRow;
     const rowType = textValue(normalized.row_type).toLowerCase() || "operation";
+
+    if (rowType === "fx_rate") {
+      const rateDate = textValue(normalized.rate_date);
+      const currencyCode = textValue(normalized.currency).toUpperCase();
+      const rateToRub = numberValue(normalized.rate_to_rub);
+
+      if (!rateDate || !currencyCode || rateToRub === null) {
+        failedRows += 1;
+        await supabase
+          .from("import_rows")
+          .update({
+            status: "failed",
+            error_message: "Cannot apply FX row: rate_date, currency or rate value is missing",
+          })
+          .eq("family_id", family.id)
+          .eq("id", row.id);
+        continue;
+      }
+
+      const { data: event, error: eventError } = await supabase
+        .from("events")
+        .insert({
+          family_id: family.id,
+          portfolio_id: importJob.portfolio_id,
+          event_type: "fx_rate",
+          title: `FX ${currencyCode}/RUB ${rateDate}`,
+          event_date: rateDate,
+          payload: {
+            broker: "bcs",
+            currency: currencyCode,
+            base_currency: "RUB",
+            rate_to_base: rateToRub,
+            source_import_id: importId,
+            source_import_row_id: row.id,
+          },
+          created_by: userId,
+        })
+        .select("id")
+        .single();
+
+      if (eventError || !event?.id) {
+        failedRows += 1;
+        await supabase
+          .from("import_rows")
+          .update({
+            status: "failed",
+            error_message: eventError?.message ?? "FX event creation failed",
+          })
+          .eq("family_id", family.id)
+          .eq("id", row.id);
+        continue;
+      }
+
+      appliedRows += 1;
+      await supabase
+        .from("import_rows")
+        .update({
+          status: "applied",
+          error_message: null,
+          created_entity_table: "events",
+          created_entity_id: event.id,
+        })
+        .eq("family_id", family.id)
+        .eq("id", row.id);
+      continue;
+    }
 
     if (rowType === "holding_snapshot") {
       const snapshotDate = textValue(normalized.snapshot_date);

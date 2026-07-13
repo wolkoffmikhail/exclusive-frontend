@@ -233,6 +233,50 @@ function parseHoldingSnapshots(rows: SheetRow[], snapshotDate: string | null) {
 
       const identifier = cellText(row, 2);
       const assetTypeText = cellText(row, 4);
+      const cashCurrency = parseCurrency(assetCode);
+      const isCashAsset = Boolean(cashCurrency) && !assetTypeText;
+
+      if (isCashAsset && cashCurrency) {
+        const beginBalance = parseNumber(row[8]);
+        const endBalance = parseNumber(row[12]) ?? beginBalance;
+        if (endBalance === null) continue;
+
+        parsed.push({
+          rowNumber: rowIndex + 1,
+          raw: {
+            broker: "bcs",
+            section: "cash_balance_snapshots",
+            source_row_number: rowIndex + 1,
+            report_section_currency: currency,
+            currency: cashCurrency,
+            begin_balance: beginBalance,
+            end_balance: endBalance,
+            market: cellText(row, 13) || null,
+            custody_place: cellText(row, 14) || null,
+          },
+          normalized: {
+            row_type: "holding_snapshot",
+            snapshot_date: snapshotDate,
+            ticker: cashCurrency,
+            isin: null,
+            asset_name: `${cashCurrency} cash`,
+            asset_type: "cash",
+            market: cellText(row, 13) || null,
+            quantity: endBalance,
+            price: 1,
+            accrued_interest_amount: null,
+            book_value_amount: endBalance,
+            market_value_amount: endBalance,
+            currency: cashCurrency,
+            security_identifier: null,
+            custody_place: cellText(row, 14) || null,
+          },
+          status: snapshotDate ? "normalized" : "failed",
+          errorMessage: snapshotDate ? null : "Snapshot date was not found in report",
+        });
+        continue;
+      }
+
       const endQuantity = parseNumber(row[9]);
       const endPrice = parseNumber(row[10]);
       const endAccruedInterest = parseNumber(row[11]);
@@ -323,8 +367,8 @@ function parseFxRates(rows: SheetRow[]) {
         rate_date: endDate,
         rate_to_rub: parseNumber(rows[index][3]),
       },
-      status: "skipped",
-      errorMessage: "FX rates are parsed for audit but are not applied yet",
+      status: endDate && parseNumber(rows[index][3]) !== null ? "normalized" : "failed",
+      errorMessage: endDate && parseNumber(rows[index][3]) !== null ? null : "FX rate date or value is missing",
     });
   }
 

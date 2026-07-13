@@ -45,10 +45,10 @@ describe("parseBcsExcelReport", () => {
 
     const rows = parseBcsExcelReport(buffer);
     const normalizedRows = rows.filter((row) => row.status === "normalized");
-    const skippedRows = rows.filter((row) => row.status === "skipped");
+    const fxRows = rows.filter((row) => row.normalized.row_type === "fx_rate");
 
-    expect(normalizedRows).toHaveLength(2);
-    expect(skippedRows).toHaveLength(1);
+    expect(normalizedRows).toHaveLength(3);
+    expect(fxRows).toHaveLength(1);
     expect(normalizedRows[0].normalized).toMatchObject({
       row_type: "cash_operation",
       trade_date: "2026-07-02",
@@ -57,7 +57,7 @@ describe("parseBcsExcelReport", () => {
       currency: "RUB",
       isin: "RU000A10ATC4",
     });
-    expect(normalizedRows[1].normalized).toMatchObject({
+    expect(normalizedRows.find((row) => row.normalized.row_type === "holding_snapshot")?.normalized).toMatchObject({
       row_type: "holding_snapshot",
       snapshot_date: "2026-07-02",
       ticker: "RU000A10ATC4",
@@ -67,7 +67,8 @@ describe("parseBcsExcelReport", () => {
       market_value_amount: 1032.34,
       currency: "RUB",
     });
-    expect(skippedRows[0].normalized).toMatchObject({
+    expect(fxRows[0].status).toBe("normalized");
+    expect(fxRows[0].normalized).toMatchObject({
       row_type: "fx_rate",
       currency: "USD",
       rate_date: "2026-07-02",
