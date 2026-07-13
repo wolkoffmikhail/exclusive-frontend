@@ -29,9 +29,26 @@ function cleanFileName(name: string) {
   );
 }
 
+void cleanFileName;
+
 function fileExtension(name: string) {
   const extension = name.split(".").pop()?.toLowerCase();
   return extension && extension !== name.toLowerCase() ? extension : "";
+}
+
+function cleanStorageFileName(name: string) {
+  const extension = fileExtension(name);
+  const baseName = extension ? name.slice(0, -(extension.length + 1)) : name;
+  const safeBaseName =
+    baseName
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-zA-Z0-9._-]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 140) || "broker-report";
+
+  return extension ? `${safeBaseName}.${extension}` : safeBaseName;
 }
 
 function redirectWithError(code: string): never {
@@ -337,7 +354,7 @@ export async function uploadBrokerReport(formData: FormData) {
   if (existingImport) redirectWithError("duplicate");
 
   const importId = crypto.randomUUID();
-  const safeName = cleanFileName(file.name);
+  const safeName = cleanStorageFileName(file.name);
   const objectKey = `families/${family.id}/imports/${importId}/${safeName}`;
   const contentType = file.type || "application/octet-stream";
 
@@ -349,7 +366,7 @@ export async function uploadBrokerReport(formData: FormData) {
     });
 
   if (uploadError) {
-    throw new Error(`Storage upload failed: ${uploadError.message}`);
+    redirectWithError("storage-upload");
   }
 
   const { error: insertError } = await supabase.from("imports").insert({
