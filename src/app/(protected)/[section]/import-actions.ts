@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { getActiveFamily } from "@/lib/portfolio/data";
+import { parseBcsExcelReport } from "@/lib/server/broker-report-parsers/bcs-xls";
 import { createClient } from "@/lib/supabase/server";
 
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
@@ -143,10 +144,13 @@ function normalizeImportRow(raw: Record<string, string>) {
 }
 
 type NormalizedImportRow = {
+  row_type?: unknown;
   trade_date?: unknown;
   settle_date?: unknown;
   operation_type?: unknown;
   ticker?: unknown;
+  isin?: unknown;
+  asset_type?: unknown;
   asset_name?: unknown;
   market?: unknown;
   quantity?: unknown;
@@ -155,6 +159,13 @@ type NormalizedImportRow = {
   fee_amount?: unknown;
   tax_amount?: unknown;
   currency?: unknown;
+  snapshot_date?: unknown;
+  book_value_amount?: unknown;
+  market_value_amount?: unknown;
+  accrued_interest_amount?: unknown;
+  security_identifier?: unknown;
+  custody_place?: unknown;
+  notes?: unknown;
 };
 
 const supportedOperationTypes = new Set([
@@ -205,43 +216,65 @@ function netAmountFor(operationType: string, grossAmount: number, feeAmount: num
 }
 
 async function findOrCreateAsset({
+  assetType,
   currencyCode,
   familyId,
+  isin,
   market,
+  metadata,
   name,
   supabase,
   ticker,
   userId,
 }: {
+  assetType?: string | null;
   currencyCode: string;
   familyId: string;
+  isin?: string | null;
   market: string | null;
+  metadata?: Record<string, unknown>;
   name: string | null;
   supabase: Awaited<ReturnType<typeof createClient>>;
   ticker: string | null;
   userId: string;
 }) {
   const normalizedTicker = ticker?.trim().toUpperCase() || null;
-  if (!normalizedTicker) return null;
+  const normalizedIsin = isin?.trim().toUpperCase() || null;
+  if (!normalizedTicker && !normalizedIsin) return null;
 
-  const { data: existingAsset } = await supabase
-    .from("assets")
-    .select("id")
-    .eq("family_id", familyId)
-    .eq("ticker", normalizedTicker)
-    .maybeSingle();
+  if (normalizedIsin) {
+    const { data: existingAssetByIsin } = await supabase
+      .from("assets")
+      .select("id")
+      .eq("family_id", familyId)
+      .eq("isin", normalizedIsin)
+      .maybeSingle();
 
-  if (existingAsset?.id) return existingAsset.id as string;
+    if (existingAssetByIsin?.id) return existingAssetByIsin.id as string;
+  }
+
+  if (normalizedTicker) {
+    const { data: existingAsset } = await supabase
+      .from("assets")
+      .select("id")
+      .eq("family_id", familyId)
+      .eq("ticker", normalizedTicker)
+      .maybeSingle();
+
+    if (existingAsset?.id) return existingAsset.id as string;
+  }
 
   const { data: insertedAsset, error: insertError } = await supabase
     .from("assets")
     .insert({
       family_id: familyId,
-      asset_type_code: "stock",
-      name: name || normalizedTicker,
+      asset_type_code: assetType || "stock",
+      name: name || normalizedTicker || normalizedIsin,
       ticker: normalizedTicker,
+      isin: normalizedIsin,
       market,
       currency_code: currencyCode,
+      metadata: metadata ?? {},
       created_by: userId,
     })
     .select("id")
@@ -253,7 +286,7 @@ async function findOrCreateAsset({
     .from("assets")
     .select("id")
     .eq("family_id", familyId)
-    .eq("ticker", normalizedTicker)
+    .eq(normalizedIsin ? "isin" : "ticker", normalizedIsin || normalizedTicker)
     .maybeSingle();
 
   if (fallbackAsset?.id) return fallbackAsset.id as string;
@@ -379,7 +412,8 @@ export async function parseBrokerImport(formData: FormData) {
   if (!importJob?.storage_object_key) redirectWithParseError("import-not-found");
 
   const extension = fileExtension(importJob.original_file_name);
-  if (extension !== "csv") redirectWithParseError("csv-only");
+  const canParse = extension === "csv" || extension === "xls" || extension === "xlsx";
+  if (!canParse) redirectWithParseError("unsupported-format");
 
   await supabase
     .from("imports")
@@ -400,33 +434,43 @@ export async function parseBrokerImport(formData: FormData) {
     redirectWithParseError("download-failed");
   }
 
-  const text = await fileBlob.text();
-  const { records } = parseCsv(text);
-  if (records.length === 0) {
+  const bytes = Buffer.from(await fileBlob.arrayBuffer());
+  const parsedRows =
+    extension === "csv"
+      ? parseCsv(bytes.toString("utf8")).records.map(({ rowNumber, raw }) => {
+          const normalized = normalizeImportRow(raw);
+          const isValid = Boolean(normalized.trade_date && normalized.operation_type);
+
+          return {
+            rowNumber,
+            raw,
+            normalized,
+            status: isValid ? "normalized" : "failed",
+            errorMessage: isValid ? null : "Required fields are missing",
+          };
+        })
+      : parseBcsExcelReport(bytes);
+
+  if (parsedRows.length === 0) {
     await supabase
       .from("imports")
-      .update({ status: "failed", error_message: "CSV has no data rows", finished_at: new Date().toISOString() })
+      .update({ status: "failed", error_message: "File has no supported data rows", finished_at: new Date().toISOString() })
       .eq("family_id", family.id)
       .eq("id", importId);
-    redirectWithParseError("empty-csv");
+    redirectWithParseError("empty-file");
   }
 
   await supabase.from("import_rows").delete().eq("family_id", family.id).eq("import_id", importId);
 
-  const rows = records.map(({ rowNumber, raw }) => {
-    const normalized = normalizeImportRow(raw);
-    const isValid = Boolean(normalized.trade_date && normalized.operation_type);
-
-    return {
-      family_id: family.id,
-      import_id: importId,
-      row_number: rowNumber,
-      raw_data: raw,
-      normalized_data: normalized,
-      status: isValid ? "normalized" : "failed",
-      error_message: isValid ? null : "Required fields are missing",
-    };
-  });
+  const rows = parsedRows.map(({ rowNumber, raw, normalized, status, errorMessage }) => ({
+    family_id: family.id,
+    import_id: importId,
+    row_number: rowNumber,
+    raw_data: raw,
+    normalized_data: normalized,
+    status,
+    error_message: errorMessage,
+  }));
 
   const { error: insertError } = await supabase.from("import_rows").insert(rows);
   if (insertError) {
@@ -452,12 +496,14 @@ export async function parseBrokerImport(formData: FormData) {
   await supabase.from("audit_log").insert({
     family_id: family.id,
     actor_user_id: userId,
-    action: "parse_broker_import_csv",
+    action: extension === "csv" ? "parse_broker_import_csv" : "parse_broker_import_excel",
     entity_table: "imports",
     entity_id: importId,
     after_data: {
+      file_extension: extension,
       rows_total: rows.length,
       rows_failed: failedRows,
+      rows_skipped: rows.filter((row) => row.status === "skipped").length,
     },
   });
 
@@ -514,10 +560,119 @@ export async function applyBrokerImport(formData: FormData) {
 
   for (const row of rowsToApply) {
     const normalized = (row.normalized_data ?? {}) as NormalizedImportRow;
+    const rowType = textValue(normalized.row_type).toLowerCase() || "operation";
+
+    if (rowType === "holding_snapshot") {
+      const snapshotDate = textValue(normalized.snapshot_date);
+      const ticker = textValue(normalized.ticker).toUpperCase() || null;
+      const isin = textValue(normalized.isin).toUpperCase() || null;
+      const assetName = textValue(normalized.asset_name) || ticker || isin;
+      const assetType = textValue(normalized.asset_type).toLowerCase() || "other";
+      const market = textValue(normalized.market).toUpperCase() || null;
+      const currencyCode = textValue(normalized.currency).toUpperCase() || family.baseCurrency;
+      const quantity = numberValue(normalized.quantity);
+      const bookValueAmount = numberValue(normalized.book_value_amount);
+      const marketValueAmount = numberValue(normalized.market_value_amount);
+
+      if (!snapshotDate || quantity === null || marketValueAmount === null) {
+        failedRows += 1;
+        await supabase
+          .from("import_rows")
+          .update({
+            status: "failed",
+            error_message: "Cannot apply snapshot row: snapshot_date, quantity or market value is missing",
+          })
+          .eq("family_id", family.id)
+          .eq("id", row.id);
+        continue;
+      }
+
+      const assetId = await findOrCreateAsset({
+        assetType,
+        currencyCode,
+        familyId: family.id,
+        isin,
+        market,
+        metadata: {
+          source: "bcs",
+          security_identifier: textValue(normalized.security_identifier) || null,
+          custody_place: textValue(normalized.custody_place) || null,
+        },
+        name: assetName,
+        supabase,
+        ticker,
+        userId,
+      });
+
+      if (!assetId) {
+        failedRows += 1;
+        await supabase
+          .from("import_rows")
+          .update({
+            status: "failed",
+            error_message: "Cannot apply snapshot row: asset identity is missing",
+          })
+          .eq("family_id", family.id)
+          .eq("id", row.id);
+        continue;
+      }
+
+      const { data: snapshot, error: snapshotError } = await supabase
+        .from("position_snapshots")
+        .upsert(
+          {
+            family_id: family.id,
+            portfolio_id: importJob.portfolio_id,
+            account_id: importJob.account_id,
+            asset_id: assetId,
+            snapshot_date: snapshotDate,
+            quantity,
+            book_value_amount: bookValueAmount,
+            market_value_amount: marketValueAmount,
+            currency_code: currencyCode,
+            source: "imported",
+            created_by: userId,
+          },
+          {
+            onConflict: "family_id,portfolio_id,account_id,asset_id,snapshot_date,source",
+          },
+        )
+        .select("id")
+        .single();
+
+      if (snapshotError || !snapshot?.id) {
+        failedRows += 1;
+        await supabase
+          .from("import_rows")
+          .update({
+            status: "failed",
+            error_message: snapshotError?.message ?? "Position snapshot creation failed",
+          })
+          .eq("family_id", family.id)
+          .eq("id", row.id);
+        continue;
+      }
+
+      appliedRows += 1;
+      await supabase
+        .from("import_rows")
+        .update({
+          status: "applied",
+          error_message: null,
+          created_entity_table: "position_snapshots",
+          created_entity_id: snapshot.id,
+        })
+        .eq("family_id", family.id)
+        .eq("id", row.id);
+      continue;
+    }
+
     const operationType = textValue(normalized.operation_type).toLowerCase();
     const tradeDate = textValue(normalized.trade_date);
     const settleDate = textValue(normalized.settle_date) || null;
     const ticker = textValue(normalized.ticker).toUpperCase() || null;
+    const isin = textValue(normalized.isin).toUpperCase() || null;
+    const assetType = textValue(normalized.asset_type).toLowerCase() || "stock";
     const assetName = textValue(normalized.asset_name) || ticker;
     const market = textValue(normalized.market).toUpperCase() || null;
     const currencyCode = textValue(normalized.currency).toUpperCase() || family.baseCurrency;
@@ -541,8 +696,10 @@ export async function applyBrokerImport(formData: FormData) {
     }
 
     const assetId = await findOrCreateAsset({
+      assetType,
       currencyCode,
       familyId: family.id,
+      isin,
       market,
       name: assetName,
       supabase,
@@ -571,7 +728,7 @@ export async function applyBrokerImport(formData: FormData) {
         currency_code: currencyCode,
         source_import_id: importId,
         source_import_row_id: row.id,
-        notes: `Created from import row ${row.row_number}`,
+        notes: textValue(normalized.notes) || `Created from import row ${row.row_number}`,
         occurred_at: `${tradeDate}T00:00:00.000Z`,
         created_by: userId,
       })

@@ -349,7 +349,7 @@ function ImportUploadForm({ accounts }: { accounts: Account[] }) {
           <h2 className="mt-2 text-xl font-semibold">Загрузить брокерский отчёт</h2>
           <p className="mt-2 max-w-2xl text-sm text-muted">
             Файл сохранится в private bucket, а в журнале появится запись со статусом “загружен”.
-            Разбор CSV уже доступен; XLSX и PDF подключим следующим шагом.
+            Разбор CSV, XLS и XLSX уже доступен; PDF подключим следующим шагом.
           </p>
         </div>
         <span className="rounded-full bg-accent/10 px-3 py-1 text-xs font-medium text-accent">PDF · CSV · XLS · XLSX</span>
@@ -417,9 +417,11 @@ function ImportNotice({
     forbidden: "У роли viewer нет права разбирать отчёты.",
     "import-required": "Не выбран импорт для разбора.",
     "import-not-found": "Импорт не найден или недоступен.",
-    "csv-only": "Сейчас поддержан разбор только CSV. XLSX и PDF добавим следующим шагом.",
+    "csv-only": "Сейчас поддержан разбор CSV, XLS и XLSX. PDF добавим следующим шагом.",
+    "unsupported-format": "Для разбора сейчас поддержаны CSV, XLS и XLSX.",
     "download-failed": "Не удалось скачать файл из private bucket.",
     "empty-csv": "В CSV нет строк данных.",
+    "empty-file": "В файле нет поддержанных строк данных.",
     "row-validation": "Файл разобран, но часть строк не прошла базовую проверку.",
   };
   const applyErrors: Record<string, string> = {
@@ -433,7 +435,7 @@ function ImportNotice({
   };
 
   if (uploaded) return <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">Файл загружен, запись импорта создана.</div>;
-  if (parsed) return <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">CSV разобран, строки импорта сохранены.</div>;
+  if (parsed) return <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">Файл разобран, строки импорта сохранены.</div>;
   if (applied) return <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">Импорт применён, операции портфеля созданы.</div>;
   if (parseError) return <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">{parseErrors[parseError] ?? "Не удалось разобрать файл."}</div>;
   if (applyError) return <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">{applyErrors[applyError] ?? "Не удалось применить импорт."}</div>;
@@ -448,8 +450,9 @@ function normalizedPreview(value: Record<string, unknown> | null) {
   return parts.length > 0 ? parts.join(" · ") : "—";
 }
 
-function canParseCsv(importJob: ImportJob) {
-  return importJob.original_file_name.toLowerCase().endsWith(".csv")
+function canParseBrokerImport(importJob: ImportJob) {
+  const fileName = importJob.original_file_name.toLowerCase();
+  return [".csv", ".xls", ".xlsx"].some((extension) => fileName.endsWith(extension))
     && ["uploaded", "parsed", "failed"].includes(importJob.status);
 }
 
@@ -480,11 +483,11 @@ function ImportsView({ data }: { data: PortfolioData }) {
             </div>
 
             <div className="mt-4 flex flex-wrap items-center gap-3">
-              {canParseCsv(importJob) && (
+              {canParseBrokerImport(importJob) && (
                 <form action={parseBrokerImport}>
                   <input name="import_id" type="hidden" value={importJob.id} />
                   <button className="rounded-2xl bg-accent px-4 py-2 text-xs font-medium text-white" type="submit">
-                    Разобрать CSV
+                    Разобрать файл
                   </button>
                 </form>
               )}
