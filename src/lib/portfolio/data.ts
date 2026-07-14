@@ -213,7 +213,7 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       .select("id, family_id, import_id, row_number, raw_data, normalized_data, status, error_message, created_at")
       .eq("family_id", family.id)
       .order("row_number", { ascending: true })
-      .limit(20),
+      .limit(500),
   ]);
 
   const operationRows = rows<Operation>(operations.data);
@@ -274,6 +274,39 @@ function calculatePositions(operations: Operation[], accounts: Account[], assets
   const snapshotByKey = latestSnapshotsByPosition(snapshots);
   const grouped = new Map<string, Position & { boughtQuantity: number; buyCost: number }>();
 
+  for (const snapshot of snapshotByKey.values()) {
+    if (!snapshot.account_id) continue;
+
+    const account = accountById.get(snapshot.account_id);
+    const asset = assetById.get(snapshot.asset_id);
+    const quantity = toNumber(snapshot.quantity);
+    const bookValue = toNumber(snapshot.book_value_amount);
+    const key = snapshotKey(snapshot.portfolio_id, snapshot.account_id, snapshot.asset_id, snapshot.currency_code);
+
+    grouped.set(key, {
+      id: key,
+      family_id: familyId,
+      portfolio_id: snapshot.portfolio_id,
+      account_id: snapshot.account_id,
+      account_name: account?.name ?? "Счёт не найден",
+      asset_id: snapshot.asset_id,
+      asset_name: asset?.name ?? "Актив не найден",
+      ticker: asset?.ticker ?? null,
+      asset_type_code: asset?.asset_type_code ?? null,
+      quantity,
+      average_price: Math.abs(quantity) > 0 ? bookValue / Math.abs(quantity) : null,
+      book_value: bookValue,
+      market_price: null,
+      market_value: null,
+      unrealized_pnl: null,
+      valuation_date: null,
+      net_cash_flow: 0,
+      currency_code: snapshot.currency_code,
+      boughtQuantity: Math.abs(quantity),
+      buyCost: bookValue,
+    });
+  }
+
   for (const operation of operations) {
     const sign = positionQuantitySign(operation.operation_type_code);
     const quantity = toNumber(operation.quantity);
@@ -311,6 +344,12 @@ function calculatePositions(operations: Operation[], accounts: Account[], assets
     const grossAmount = Math.abs(toNumber(operation.gross_amount));
     const feeAmount = Math.abs(toNumber(operation.fee_amount));
     const taxAmount = Math.abs(toNumber(operation.tax_amount));
+
+    if (snapshotByKey.has(key)) {
+      existing.net_cash_flow += toNumber(operation.net_amount);
+      grouped.set(key, existing);
+      continue;
+    }
 
     existing.quantity += signedQuantity;
     existing.net_cash_flow += toNumber(operation.net_amount);

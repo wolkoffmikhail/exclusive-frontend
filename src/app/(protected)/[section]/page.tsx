@@ -445,9 +445,61 @@ function ImportNotice({
 
 function normalizedPreview(value: Record<string, unknown> | null) {
   if (!value) return "—";
+
+  if (value.row_type === "fx_rate") {
+    return [value.rate_date, "FX", `${value.currency}/RUB`, value.rate_to_rub]
+      .filter((item) => item !== null && item !== undefined && item !== "")
+      .join(" · ");
+  }
+
+  if (value.row_type === "holding_snapshot") {
+    return [value.snapshot_date, value.ticker, value.quantity, value.market_value_amount ?? value.price, value.currency]
+      .filter((item) => item !== null && item !== undefined && item !== "")
+      .join(" · ");
+  }
+
+  if (value.row_type === "cash_operation") {
+    return [value.trade_date, value.operation_type, value.amount, value.currency]
+      .filter((item) => item !== null && item !== undefined && item !== "")
+      .join(" · ");
+  }
+
   const parts = [value.trade_date, value.operation_type, value.ticker, value.quantity, value.price, value.currency]
     .filter((item) => item !== null && item !== undefined && item !== "");
   return parts.length > 0 ? parts.join(" · ") : "—";
+}
+
+function summarizeImportRows(rows: PortfolioData["importRows"]) {
+  const summary = {
+    cashOperations: 0,
+    positions: 0,
+    cashBalances: 0,
+    fxRates: 0,
+    skipped: 0,
+    failed: 0,
+  };
+
+  for (const row of rows) {
+    if (row.status === "skipped") summary.skipped += 1;
+    if (row.status === "failed") summary.failed += 1;
+
+    const normalized = row.normalized_data;
+    if (!normalized) continue;
+
+    if (normalized.row_type === "cash_operation") summary.cashOperations += 1;
+    if (normalized.row_type === "fx_rate") summary.fxRates += 1;
+    if (normalized.row_type === "holding_snapshot" && normalized.asset_type === "cash") summary.cashBalances += 1;
+    if (normalized.row_type === "holding_snapshot" && normalized.asset_type !== "cash") summary.positions += 1;
+  }
+
+  return [
+    { label: "Денежные операции", value: summary.cashOperations },
+    { label: "Позиции", value: summary.positions },
+    { label: "Валютные остатки", value: summary.cashBalances },
+    { label: "FX-курсы", value: summary.fxRates },
+    { label: "Пропущено", value: summary.skipped },
+    { label: "Ошибки", value: summary.failed },
+  ];
 }
 
 function canParseBrokerImport(importJob: ImportJob) {
@@ -468,6 +520,7 @@ function ImportsView({ data }: { data: PortfolioData }) {
     <div className="space-y-3">
       {data.imports.map((importJob) => {
         const rows = data.importRows.filter((row) => row.import_id === importJob.id);
+        const summary = summarizeImportRows(rows);
 
         return (
           <div className="rounded-2xl border border-border bg-surface p-4" key={importJob.id}>
@@ -501,6 +554,17 @@ function ImportsView({ data }: { data: PortfolioData }) {
               )}
               {rows.length > 0 && <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">Строк: {rows.length}</span>}
             </div>
+
+            {rows.length > 0 && (
+              <div className="mt-4 grid gap-2 md:grid-cols-3 xl:grid-cols-6">
+                {summary.map((item) => (
+                  <div className="rounded-2xl border border-border bg-background px-3 py-2" key={item.label}>
+                    <p className="text-[11px] uppercase tracking-wide text-muted">{item.label}</p>
+                    <p className="mt-1 text-lg font-semibold">{item.value}</p>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {rows.length > 0 && (
               <div className="mt-4 overflow-hidden rounded-2xl border border-border bg-background">
