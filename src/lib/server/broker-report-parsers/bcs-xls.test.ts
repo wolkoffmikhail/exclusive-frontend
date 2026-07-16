@@ -45,9 +45,11 @@ describe("parseBcsExcelReport", () => {
 
     const rows = parseBcsExcelReport(buffer);
     const normalizedRows = rows.filter((row) => row.status === "normalized");
+    const skippedRows = rows.filter((row) => row.status === "skipped");
     const fxRows = rows.filter((row) => row.normalized.row_type === "fx_rate");
 
     expect(normalizedRows).toHaveLength(3);
+    expect(skippedRows.length).toBeGreaterThan(0);
     expect(fxRows).toHaveLength(1);
     expect(normalizedRows[0].normalized).toMatchObject({
       row_type: "cash_operation",
@@ -75,4 +77,43 @@ describe("parseBcsExcelReport", () => {
       rate_to_rub: 78.2652,
     });
   });
+
+  it("marks holding snapshots as failed when the report date is missing", () => {
+    const buffer = workbookBuffer([
+      ["Портфель по ценным бумагам, денежным средствам и ДМ (Рубль)", null, null, null, null, "на начало периода", null, null, null, "на конец периода"],
+      [
+        "Вид актива",
+        null,
+        "Номер гос. регистрации ЦБ/ ISIN",
+        null,
+        "Тип актива (для ЦБ - № вып.)",
+        "Кол-во ЦБ / Масса ДМ (шт/г)",
+        "Цена закрытия",
+        "Сумма НКД",
+        "Сумма, в т.ч. НКД",
+        "Кол-во ЦБ / Масса ДМ (шт/г)",
+        "Цена закрытия",
+        "Сумма НКД",
+        "Сумма, в т.ч. НКД",
+        "Организатор торгов (2*)",
+        "Место хранения",
+        "Эмитент",
+      ],
+      ["RU000A10ATC4", null, "RU000A10ATC4", null, "Обл.", "10", "100.00 %", null, "1,000.00", "10", "102.00 %", "12.34", "1,032.34", "ММВБ", "Торг.(НРД)", "ПАО Тест"],
+    ]);
+
+    const rows = parseBcsExcelReport(buffer);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      status: "failed",
+      errorMessage: "Snapshot date was not found in report",
+      normalized: {
+        row_type: "holding_snapshot",
+        snapshot_date: null,
+        ticker: "RU000A10ATC4",
+      },
+    });
+  });
+
 });

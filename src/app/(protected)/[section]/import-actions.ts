@@ -1,10 +1,19 @@
 "use server";
 
-import { createHash } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { getActiveFamily } from "@/lib/portfolio/data";
 import { parseBcsExcelReport } from "@/lib/server/broker-report-parsers/bcs-xls";
+import {
+  applyImportSummary,
+  buildImportUploadRecord,
+  canChangeImports,
+  canPerformCriticalImportAction,
+  emptyApplyOutcome,
+  hasDuplicateImport,
+  importRowsForParsedRows,
+  parsedImportSummary,
+} from "@/lib/server/import-workflow";
 import { createClient } from "@/lib/supabase/server";
 
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
@@ -51,6 +60,8 @@ function cleanStorageFileName(name: string) {
   return extension ? `${safeBaseName}.${extension}` : safeBaseName;
 }
 
+void cleanStorageFileName;
+
 function redirectWithError(code: string): never {
   redirect(`/import?error=${encodeURIComponent(code)}`);
 }
@@ -61,6 +72,14 @@ function redirectWithParseError(code: string): never {
 
 function redirectWithApplyError(code: string): never {
   redirect(`/import?apply_error=${encodeURIComponent(code)}`);
+}
+
+function redirectWithReconcileError(code: string): never {
+  redirect(`/import?reconcile_error=${encodeURIComponent(code)}`);
+}
+
+function redirectWithDeleteError(code: string): never {
+  redirect(`/import?delete_error=${encodeURIComponent(code)}`);
 }
 
 function parseCsv(text: string) {
@@ -275,12 +294,16 @@ async function findOrCreateAsset({
   if (normalizedTicker) {
     const { data: existingAsset } = await supabase
       .from("assets")
-      .select("id")
+      .select("id, isin")
       .eq("family_id", familyId)
       .eq("ticker", normalizedTicker)
       .maybeSingle();
 
-    if (existingAsset?.id) return existingAsset.id as string;
+    if (existingAsset?.id) {
+      const existingIsin = typeof existingAsset.isin === "string" ? existingAsset.isin.toUpperCase() : null;
+      if (normalizedIsin && existingIsin !== normalizedIsin) return null;
+      return existingAsset.id as string;
+    }
   }
 
   const { data: insertedAsset, error: insertError } = await supabase
@@ -320,7 +343,7 @@ export async function uploadBrokerReport(formData: FormData) {
 
   const family = await getActiveFamily(supabase, userId);
   if (!family) redirectWithError("no-family");
-  if (family.role === "viewer") redirectWithError("forbidden");
+  if (!canChangeImports(family.role)) redirectWithError("forbidden");
 
   const accountId = String(formData.get("account_id") ?? "");
   if (!accountId) redirectWithError("account-required");
@@ -343,27 +366,32 @@ export async function uploadBrokerReport(formData: FormData) {
   if (!account) redirectWithError("account-not-found");
 
   const bytes = Buffer.from(await file.arrayBuffer());
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const uploadRecord = buildImportUploadRecord({
+    accountId: account.id,
+    bytes,
+    familyId: family.id,
+    fileName: file.name,
+    fileSize: file.size,
+    fileType: file.type,
+    importId: crypto.randomUUID(),
+    portfolioId: account.portfolio_id,
+    userId,
+  });
 
   const { data: existingImport } = await supabase
     .from("imports")
     .select("id")
     .eq("family_id", family.id)
     .eq("account_id", account.id)
-    .eq("sha256", sha256)
+    .eq("sha256", uploadRecord.sha256)
     .maybeSingle();
 
-  if (existingImport) redirectWithError("duplicate");
-
-  const importId = crypto.randomUUID();
-  const safeName = cleanStorageFileName(file.name);
-  const objectKey = `families/${family.id}/imports/${importId}/${safeName}`;
-  const contentType = file.type || "application/octet-stream";
+  if (hasDuplicateImport(existingImport)) redirectWithError("duplicate");
 
   const { error: uploadError } = await supabase.storage
-    .from("broker-reports")
-    .upload(objectKey, bytes, {
-      contentType,
+    .from(uploadRecord.storageBucket)
+    .upload(uploadRecord.storageObjectKey, bytes, {
+      contentType: uploadRecord.contentType,
       upsert: false,
     });
 
@@ -371,20 +399,7 @@ export async function uploadBrokerReport(formData: FormData) {
     redirectWithError("storage-upload");
   }
 
-  const { error: insertError } = await supabase.from("imports").insert({
-    id: importId,
-    family_id: family.id,
-    portfolio_id: account.portfolio_id,
-    account_id: account.id,
-    original_file_name: file.name,
-    storage_bucket: "broker-reports",
-    storage_object_key: objectKey,
-    file_mime_type: contentType,
-    file_size_bytes: file.size,
-    sha256,
-    status: "uploaded",
-    imported_by: userId,
-  });
+  const { error: insertError } = await supabase.from("imports").insert(uploadRecord.importRecord);
 
   if (insertError) {
     throw new Error(`Import record creation failed: ${insertError.message}`);
@@ -395,13 +410,8 @@ export async function uploadBrokerReport(formData: FormData) {
     actor_user_id: userId,
     action: "upload_broker_report",
     entity_table: "imports",
-    entity_id: importId,
-    after_data: {
-      original_file_name: file.name,
-      storage_object_key: objectKey,
-      file_size_bytes: file.size,
-      sha256,
-    },
+    entity_id: uploadRecord.importRecord.id,
+    after_data: uploadRecord.auditAfterData,
   });
 
   revalidatePath("/import");
@@ -416,7 +426,7 @@ export async function parseBrokerImport(formData: FormData) {
 
   const family = await getActiveFamily(supabase, userId);
   if (!family) redirectWithParseError("no-family");
-  if (family.role === "viewer") redirectWithParseError("forbidden");
+  if (!canChangeImports(family.role)) redirectWithParseError("forbidden");
 
   const importId = String(formData.get("import_id") ?? "");
   if (!importId) redirectWithParseError("import-required");
@@ -432,7 +442,18 @@ export async function parseBrokerImport(formData: FormData) {
 
   const extension = fileExtension(importJob.original_file_name);
   const canParse = extension === "csv" || extension === "xls" || extension === "xlsx";
-  if (!canParse) redirectWithParseError("unsupported-format");
+  if (!canParse) {
+    await supabase
+      .from("imports")
+      .update({
+        status: "failed",
+        error_message: `Unsupported file format for parsing: ${extension || "unknown"}`,
+        finished_at: new Date().toISOString(),
+      })
+      .eq("family_id", family.id)
+      .eq("id", importId);
+    redirectWithParseError("unsupported-format");
+  }
 
   await supabase
     .from("imports")
@@ -464,7 +485,7 @@ export async function parseBrokerImport(formData: FormData) {
             rowNumber,
             raw,
             normalized,
-            status: isValid ? "normalized" : "failed",
+            status: isValid ? ("normalized" as const) : ("failed" as const),
             errorMessage: isValid ? null : "Required fields are missing",
           };
         })
@@ -481,15 +502,7 @@ export async function parseBrokerImport(formData: FormData) {
 
   await supabase.from("import_rows").delete().eq("family_id", family.id).eq("import_id", importId);
 
-  const rows = parsedRows.map(({ rowNumber, raw, normalized, status, errorMessage }) => ({
-    family_id: family.id,
-    import_id: importId,
-    row_number: rowNumber,
-    raw_data: raw,
-    normalized_data: normalized,
-    status,
-    error_message: errorMessage,
-  }));
+  const rows = importRowsForParsedRows({ familyId: family.id, importId, parsedRows });
 
   const { error: insertError } = await supabase.from("import_rows").insert(rows);
   if (insertError) {
@@ -501,12 +514,12 @@ export async function parseBrokerImport(formData: FormData) {
     throw new Error(`Import rows creation failed: ${insertError.message}`);
   }
 
-  const failedRows = rows.filter((row) => row.status === "failed").length;
+  const summary = parsedImportSummary(rows);
   await supabase
     .from("imports")
     .update({
-      status: failedRows > 0 ? "failed" : "parsed",
-      error_message: failedRows > 0 ? `${failedRows} rows failed validation` : null,
+      status: summary.importStatus,
+      error_message: summary.errorMessage,
       finished_at: new Date().toISOString(),
     })
     .eq("family_id", family.id)
@@ -521,13 +534,13 @@ export async function parseBrokerImport(formData: FormData) {
     after_data: {
       file_extension: extension,
       rows_total: rows.length,
-      rows_failed: failedRows,
-      rows_skipped: rows.filter((row) => row.status === "skipped").length,
+      rows_failed: summary.failedRows,
+      rows_skipped: summary.skippedRows,
     },
   });
 
   revalidatePath("/import");
-  redirect(failedRows > 0 ? "/import?parse_error=row-validation" : "/import?parsed=1");
+  redirect(summary.failedRows > 0 ? "/import?parse_error=row-validation" : "/import?parsed=1");
 }
 
 export async function applyBrokerImport(formData: FormData) {
@@ -538,7 +551,7 @@ export async function applyBrokerImport(formData: FormData) {
 
   const family = await getActiveFamily(supabase, userId);
   if (!family) redirectWithApplyError("no-family");
-  if (family.role === "viewer") redirectWithApplyError("forbidden");
+  if (!canChangeImports(family.role)) redirectWithApplyError("forbidden");
 
   const importId = String(formData.get("import_id") ?? "");
   if (!importId) redirectWithApplyError("import-required");
@@ -564,7 +577,7 @@ export async function applyBrokerImport(formData: FormData) {
   if (rowsError) throw new Error(`Import rows lookup failed: ${rowsError.message}`);
 
   if (!rowsToApply || rowsToApply.length === 0) {
-    if (importJob.status === "applied") redirect("/import?applied=1");
+    if (emptyApplyOutcome(importJob.status) === "already-applied") redirect("/import?applied=1");
     redirectWithApplyError("no-normalized-rows");
   }
 
@@ -811,6 +824,7 @@ export async function applyBrokerImport(formData: FormData) {
         tax_amount: taxAmount,
         net_amount: netAmount,
         currency_code: currencyCode,
+        source: "import",
         source_import_id: importId,
         source_import_row_id: row.id,
         notes: textValue(normalized.notes) || `Created from import row ${row.row_number}`,
@@ -847,11 +861,12 @@ export async function applyBrokerImport(formData: FormData) {
       .eq("id", row.id);
   }
 
+  const completion = applyImportSummary(failedRows);
   await supabase
     .from("imports")
     .update({
-      status: failedRows > 0 ? "failed" : "applied",
-      error_message: failedRows > 0 ? `${failedRows} rows failed applying` : null,
+      status: completion.importStatus,
+      error_message: completion.errorMessage,
       finished_at: new Date().toISOString(),
     })
     .eq("family_id", family.id)
@@ -872,4 +887,171 @@ export async function applyBrokerImport(formData: FormData) {
   revalidatePath("/import");
   revalidatePath("/dashboard");
   redirect(failedRows > 0 ? "/import?apply_error=row-apply" : "/import?applied=1");
+}
+
+export async function skipImportRow(formData: FormData) {
+  const supabase = await createClient();
+  const { data: claimsData } = await supabase.auth.getClaims();
+  const userId = claimsData?.claims?.sub;
+  if (!userId) redirect("/login");
+
+  const family = await getActiveFamily(supabase, userId);
+  if (!family) redirectWithReconcileError("no-family");
+  if (!canChangeImports(family.role)) redirectWithReconcileError("forbidden");
+
+  const rowId = String(formData.get("row_id") ?? "");
+  if (!rowId) redirectWithReconcileError("row-required");
+
+  const { data: row, error: rowError } = await supabase
+    .from("import_rows")
+    .select("id, import_id, row_number, status")
+    .eq("family_id", family.id)
+    .eq("id", rowId)
+    .maybeSingle();
+
+  if (rowError) throw new Error(`Import row lookup failed: ${rowError.message}`);
+  if (!row) redirectWithReconcileError("row-not-found");
+  if (row.status === "applied") redirectWithReconcileError("row-applied");
+
+  const { error: updateError } = await supabase
+    .from("import_rows")
+    .update({ status: "skipped" })
+    .eq("family_id", family.id)
+    .eq("id", rowId);
+
+  if (updateError) throw new Error(`Import row skip failed: ${updateError.message}`);
+
+  await supabase.from("audit_log").insert({
+    family_id: family.id,
+    actor_user_id: userId,
+    action: "skip_import_row",
+    entity_table: "import_rows",
+    entity_id: rowId,
+    before_data: {
+      import_id: row.import_id,
+      row_number: row.row_number,
+      status: row.status,
+    },
+    after_data: {
+      status: "skipped",
+    },
+  });
+
+  revalidatePath("/import");
+  redirect("/import?reconciled=1");
+}
+
+export async function restoreImportRow(formData: FormData) {
+  const supabase = await createClient();
+  const { data: claimsData } = await supabase.auth.getClaims();
+  const userId = claimsData?.claims?.sub;
+  if (!userId) redirect("/login");
+
+  const family = await getActiveFamily(supabase, userId);
+  if (!family) redirectWithReconcileError("no-family");
+  if (!canChangeImports(family.role)) redirectWithReconcileError("forbidden");
+
+  const rowId = String(formData.get("row_id") ?? "");
+  if (!rowId) redirectWithReconcileError("row-required");
+
+  const { data: row, error: rowError } = await supabase
+    .from("import_rows")
+    .select("id, import_id, row_number, status, normalized_data")
+    .eq("family_id", family.id)
+    .eq("id", rowId)
+    .maybeSingle();
+
+  if (rowError) throw new Error(`Import row lookup failed: ${rowError.message}`);
+  if (!row) redirectWithReconcileError("row-not-found");
+  if (row.status !== "skipped") redirectWithReconcileError("row-not-skipped");
+
+  const restoredStatus = row.normalized_data ? "normalized" : "failed";
+  const { error: updateError } = await supabase
+    .from("import_rows")
+    .update({ status: restoredStatus })
+    .eq("family_id", family.id)
+    .eq("id", rowId);
+
+  if (updateError) throw new Error(`Import row restore failed: ${updateError.message}`);
+
+  await supabase.from("audit_log").insert({
+    family_id: family.id,
+    actor_user_id: userId,
+    action: "restore_import_row",
+    entity_table: "import_rows",
+    entity_id: rowId,
+    before_data: {
+      import_id: row.import_id,
+      row_number: row.row_number,
+      status: row.status,
+    },
+    after_data: {
+      status: restoredStatus,
+    },
+  });
+
+  revalidatePath("/import");
+  redirect("/import?reconciled=1");
+}
+
+export async function deleteFailedImport(formData: FormData) {
+  const supabase = await createClient();
+  const { data: claimsData } = await supabase.auth.getClaims();
+  const userId = claimsData?.claims?.sub;
+  if (!userId) redirect("/login");
+
+  const family = await getActiveFamily(supabase, userId);
+  if (!family) redirectWithDeleteError("no-family");
+  if (!canPerformCriticalImportAction(family.role)) redirectWithDeleteError("forbidden");
+
+  const importId = String(formData.get("import_id") ?? "");
+  const confirmation = String(formData.get("confirm") ?? "").trim().toUpperCase();
+  if (!importId) redirectWithDeleteError("import-required");
+  if (confirmation !== "DELETE" && confirmation !== "УДАЛИТЬ") redirectWithDeleteError("confirm-required");
+
+  const { data: importJob, error: importError } = await supabase
+    .from("imports")
+    .select("id, status, original_file_name, storage_bucket, storage_object_key")
+    .eq("family_id", family.id)
+    .eq("id", importId)
+    .maybeSingle();
+
+  if (importError) throw new Error(`Import lookup failed: ${importError.message}`);
+  if (!importJob) redirectWithDeleteError("import-not-found");
+  if (!["failed", "cancelled"].includes(importJob.status)) redirectWithDeleteError("status-not-deletable");
+
+  if (importJob.storage_object_key) {
+    const { error: storageError } = await supabase.storage
+      .from(importJob.storage_bucket || "broker-reports")
+      .remove([importJob.storage_object_key]);
+
+    if (storageError) throw new Error(`Import file delete failed: ${storageError.message}`);
+  }
+
+  const { error: deleteError } = await supabase
+    .from("imports")
+    .delete()
+    .eq("family_id", family.id)
+    .eq("id", importId);
+
+  if (deleteError) throw new Error(`Import delete failed: ${deleteError.message}`);
+
+  await supabase.from("audit_log").insert({
+    family_id: family.id,
+    actor_user_id: userId,
+    action: "delete_failed_import",
+    entity_table: "imports",
+    entity_id: importId,
+    before_data: {
+      original_file_name: importJob.original_file_name,
+      status: importJob.status,
+      storage_object_key: importJob.storage_object_key,
+    },
+  });
+
+  revalidatePath("/import");
+  revalidatePath("/dashboard");
+  revalidatePath("/assets");
+  revalidatePath("/accounts");
+  redirect("/import?deleted=1");
 }

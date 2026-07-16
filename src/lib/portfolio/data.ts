@@ -1,4 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { buildPortfolioAnalytics, type PortfolioAnalytics } from "./analytics";
+import { calculateCashBalances, calculatePositions, type CalculatedCashBalance } from "./calculations";
 
 export type ActiveFamily = {
   id: string;
@@ -34,6 +36,7 @@ export type Asset = {
   asset_type_code: string;
   name: string;
   ticker: string | null;
+  isin: string | null;
   market: string | null;
   currency_code: string | null;
   status: string;
@@ -53,6 +56,12 @@ export type Operation = {
   tax_amount: number | string | null;
   net_amount: number | string;
   currency_code: string;
+  source: string;
+  operation_group_id: string | null;
+  metadata: Record<string, unknown>;
+  notes: string | null;
+  cancelled_at: string | null;
+  cancellation_reason: string | null;
 };
 
 export type Position = {
@@ -99,6 +108,7 @@ export type ImportJob = {
   file_size_bytes: number | null;
   sha256: string;
   status: string;
+  error_message: string | null;
   created_at: string;
 };
 
@@ -114,6 +124,18 @@ export type ImportRow = {
   created_at: string;
 };
 
+export type AuditLogEntry = {
+  id: string;
+  family_id: string;
+  actor_user_id: string | null;
+  action: string;
+  entity_table: string;
+  entity_id: string | null;
+  before_data: Record<string, unknown> | null;
+  after_data: Record<string, unknown> | null;
+  created_at: string;
+};
+
 export type PortfolioData = {
   family: ActiveFamily | null;
   portfolios: Portfolio[];
@@ -122,8 +144,11 @@ export type PortfolioData = {
   operations: Operation[];
   operationCount: number;
   positions: Position[];
+  cashBalances: CalculatedCashBalance[];
+  analytics: PortfolioAnalytics;
   imports: ImportJob[];
   importRows: ImportRow[];
+  auditLog: AuditLogEntry[];
 };
 
 type FamilyMemberRow = {
@@ -169,12 +194,20 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       operations: [],
       operationCount: 0,
       positions: [],
+      cashBalances: [],
+      analytics: buildPortfolioAnalytics({
+        operations: [],
+        positions: [],
+        cashBalances: [],
+        baseCurrency: "RUB",
+      }),
       imports: [],
       importRows: [],
+      auditLog: [],
     };
   }
 
-  const [portfolios, accounts, assets, operations, positionSnapshots, imports, importRows] = await Promise.all([
+  const [portfolios, accounts, assets, operations, positionSnapshots, imports, importRows, auditLog] = await Promise.all([
     supabase
       .from("portfolios")
       .select("id, family_id, name, base_currency, status, description, created_at")
@@ -187,13 +220,14 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       .order("created_at", { ascending: true }),
     supabase
       .from("assets")
-      .select("id, family_id, asset_type_code, name, ticker, market, currency_code, status")
+      .select("id, family_id, asset_type_code, name, ticker, isin, market, currency_code, status")
       .eq("family_id", family.id)
       .order("created_at", { ascending: true }),
     supabase
       .from("operations")
-      .select("id, family_id, account_id, asset_id, trade_date, operation_type_code, quantity, price, gross_amount, fee_amount, tax_amount, net_amount, currency_code")
+      .select("id, family_id, account_id, asset_id, trade_date, operation_type_code, quantity, price, gross_amount, fee_amount, tax_amount, net_amount, currency_code, source, operation_group_id, metadata, notes, cancelled_at, cancellation_reason")
       .eq("family_id", family.id)
+      .is("cancelled_at", null)
       .order("trade_date", { ascending: false })
       .limit(500),
     supabase
@@ -204,7 +238,7 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       .limit(500),
     supabase
       .from("imports")
-      .select("id, family_id, account_id, original_file_name, storage_object_key, file_size_bytes, sha256, status, created_at")
+      .select("id, family_id, account_id, original_file_name, storage_object_key, file_size_bytes, sha256, status, error_message, created_at")
       .eq("family_id", family.id)
       .order("created_at", { ascending: false })
       .limit(5),
@@ -214,12 +248,20 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       .eq("family_id", family.id)
       .order("row_number", { ascending: true })
       .limit(500),
+    supabase
+      .from("audit_log")
+      .select("id, family_id, actor_user_id, action, entity_table, entity_id, before_data, after_data, created_at")
+      .eq("family_id", family.id)
+      .order("created_at", { ascending: false })
+      .limit(20),
   ]);
 
   const operationRows = rows<Operation>(operations.data);
   const accountRows = rows<Account>(accounts.data);
   const assetRows = rows<Asset>(assets.data);
   const snapshotRows = rows<PositionSnapshot>(positionSnapshots.data);
+  const positions = calculatePositions(operationRows, accountRows, assetRows, snapshotRows, family.id);
+  const cashBalances = calculateCashBalances(operationRows, accountRows, assetRows, snapshotRows, family.id);
 
   return {
     family,
@@ -228,184 +270,16 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
     assets: assetRows,
     operations: operationRows.slice(0, 5),
     operationCount: operationRows.length,
-    positions: calculatePositions(operationRows, accountRows, assetRows, snapshotRows, family.id),
+    positions,
+    cashBalances,
+    analytics: buildPortfolioAnalytics({
+      operations: operationRows,
+      positions,
+      cashBalances,
+      baseCurrency: family.baseCurrency,
+    }),
     imports: rows<ImportJob>(imports.data),
     importRows: rows<ImportRow>(importRows.data),
-  };
-}
-
-function toNumber(value: number | string | null | undefined) {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-  return 0;
-}
-
-function positionQuantitySign(operationType: string) {
-  if (["buy", "transfer_in"].includes(operationType)) return 1;
-  if (["sell", "transfer_out"].includes(operationType)) return -1;
-  return 0;
-}
-
-function snapshotKey(portfolioId: string, accountId: string, assetId: string, currencyCode: string) {
-  return `${portfolioId}:${accountId}:${assetId}:${currencyCode}`;
-}
-
-function latestSnapshotsByPosition(snapshots: PositionSnapshot[]) {
-  const snapshotsByKey = new Map<string, PositionSnapshot>();
-
-  for (const snapshot of snapshots) {
-    if (!snapshot.account_id) continue;
-    const key = snapshotKey(snapshot.portfolio_id, snapshot.account_id, snapshot.asset_id, snapshot.currency_code);
-    const existing = snapshotsByKey.get(key);
-    if (!existing || snapshot.snapshot_date > existing.snapshot_date) {
-      snapshotsByKey.set(key, snapshot);
-    }
-  }
-
-  return snapshotsByKey;
-}
-
-function calculatePositions(operations: Operation[], accounts: Account[], assets: Asset[], snapshots: PositionSnapshot[], familyId: string): Position[] {
-  const accountById = new Map(accounts.map((account) => [account.id, account]));
-  const assetById = new Map(assets.map((asset) => [asset.id, asset]));
-  const snapshotByKey = latestSnapshotsByPosition(snapshots);
-  const grouped = new Map<string, Position & { boughtQuantity: number; buyCost: number }>();
-
-  for (const snapshot of snapshotByKey.values()) {
-    if (!snapshot.account_id) continue;
-
-    const account = accountById.get(snapshot.account_id);
-    const asset = assetById.get(snapshot.asset_id);
-    const quantity = toNumber(snapshot.quantity);
-    const bookValue = toNumber(snapshot.book_value_amount);
-    const key = snapshotKey(snapshot.portfolio_id, snapshot.account_id, snapshot.asset_id, snapshot.currency_code);
-
-    grouped.set(key, {
-      id: key,
-      family_id: familyId,
-      portfolio_id: snapshot.portfolio_id,
-      account_id: snapshot.account_id,
-      account_name: account?.name ?? "Счёт не найден",
-      asset_id: snapshot.asset_id,
-      asset_name: asset?.name ?? "Актив не найден",
-      ticker: asset?.ticker ?? null,
-      asset_type_code: asset?.asset_type_code ?? null,
-      quantity,
-      average_price: Math.abs(quantity) > 0 ? bookValue / Math.abs(quantity) : null,
-      book_value: bookValue,
-      market_price: null,
-      market_value: null,
-      unrealized_pnl: null,
-      valuation_date: null,
-      net_cash_flow: 0,
-      currency_code: snapshot.currency_code,
-      boughtQuantity: Math.abs(quantity),
-      buyCost: bookValue,
-    });
-  }
-
-  for (const operation of operations) {
-    const sign = positionQuantitySign(operation.operation_type_code);
-    const quantity = toNumber(operation.quantity);
-    const hasAssetPosition = Boolean(operation.asset_id) && sign !== 0 && quantity !== 0;
-    if (!hasAssetPosition) continue;
-
-    const asset = operation.asset_id ? assetById.get(operation.asset_id) : null;
-    const account = accountById.get(operation.account_id);
-    const portfolioId = account?.portfolio_id ?? "";
-    const key = snapshotKey(portfolioId, operation.account_id, operation.asset_id ?? "", operation.currency_code);
-    const existing = grouped.get(key) ?? {
-      id: key,
-      family_id: familyId,
-      portfolio_id: portfolioId,
-      account_id: operation.account_id,
-      account_name: account?.name ?? "Счёт не найден",
-      asset_id: operation.asset_id,
-      asset_name: asset?.name ?? "Актив не найден",
-      ticker: asset?.ticker ?? null,
-      asset_type_code: asset?.asset_type_code ?? null,
-      quantity: 0,
-      average_price: null,
-      book_value: 0,
-      market_price: null,
-      market_value: null,
-      unrealized_pnl: null,
-      valuation_date: null,
-      net_cash_flow: 0,
-      currency_code: operation.currency_code,
-      boughtQuantity: 0,
-      buyCost: 0,
-    };
-
-    const signedQuantity = sign * Math.abs(quantity);
-    const grossAmount = Math.abs(toNumber(operation.gross_amount));
-    const feeAmount = Math.abs(toNumber(operation.fee_amount));
-    const taxAmount = Math.abs(toNumber(operation.tax_amount));
-
-    if (snapshotByKey.has(key)) {
-      existing.net_cash_flow += toNumber(operation.net_amount);
-      grouped.set(key, existing);
-      continue;
-    }
-
-    existing.quantity += signedQuantity;
-    existing.net_cash_flow += toNumber(operation.net_amount);
-
-    if (operation.operation_type_code === "buy" || operation.operation_type_code === "transfer_in") {
-      const effectiveCost = grossAmount + feeAmount + taxAmount;
-      existing.boughtQuantity += Math.abs(quantity);
-      existing.buyCost += effectiveCost;
-    }
-
-    if (existing.boughtQuantity > 0) {
-      existing.average_price = existing.buyCost / existing.boughtQuantity;
-      existing.book_value = Math.max(existing.quantity, 0) * existing.average_price;
-    }
-
-    grouped.set(key, existing);
-  }
-
-  return Array.from(grouped.values())
-    .filter((position) => Math.abs(position.quantity) > 0.0000001)
-    .sort((left, right) => left.asset_name.localeCompare(right.asset_name, "ru"))
-    .map((position) => ({
-      ...position,
-      ...marketValuation(position, snapshotByKey.get(snapshotKey(position.portfolio_id, position.account_id, position.asset_id ?? "", position.currency_code))),
-    }))
-    .map((position) => ({
-      id: position.id,
-      family_id: position.family_id,
-      portfolio_id: position.portfolio_id,
-      account_id: position.account_id,
-      account_name: position.account_name,
-      asset_id: position.asset_id,
-      asset_name: position.asset_name,
-      ticker: position.ticker,
-      asset_type_code: position.asset_type_code,
-      quantity: position.quantity,
-      average_price: position.average_price,
-      book_value: position.book_value,
-      market_price: position.market_price,
-      market_value: position.market_value,
-      unrealized_pnl: position.unrealized_pnl,
-      valuation_date: position.valuation_date,
-      net_cash_flow: position.net_cash_flow,
-      currency_code: position.currency_code,
-    }));
-}
-
-function marketValuation(position: Position, snapshot: PositionSnapshot | undefined) {
-  const marketValue = snapshot?.market_value_amount == null ? null : toNumber(snapshot.market_value_amount);
-  const quantity = Math.abs(position.quantity);
-  const marketPrice = marketValue !== null && quantity > 0 ? marketValue / quantity : null;
-
-  return {
-    market_price: marketPrice,
-    market_value: marketValue,
-    unrealized_pnl: marketValue === null ? null : marketValue - position.book_value,
-    valuation_date: snapshot?.snapshot_date ?? null,
+    auditLog: rows<AuditLogEntry>(auditLog.data),
   };
 }

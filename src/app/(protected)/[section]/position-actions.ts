@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { getActiveFamily, getPortfolioData } from "@/lib/portfolio/data";
+import { canEditFamilyData } from "@/lib/portfolio/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 function redirectWithPriceError(code: string): never {
@@ -26,7 +27,7 @@ export async function saveManualPositionPrice(formData: FormData) {
 
   const family = await getActiveFamily(supabase, userId);
   if (!family) redirectWithPriceError("no-family");
-  if (family.role === "viewer") redirectWithPriceError("forbidden");
+  if (!canEditFamilyData(family.role)) redirectWithPriceError("forbidden");
 
   const accountId = String(formData.get("account_id") ?? "");
   const assetId = String(formData.get("asset_id") ?? "");

@@ -11,7 +11,9 @@
     "test": "vitest run",
     "check": "npm run lint && npm run typecheck && npm run test && npm run build",
     "smoke": "node scripts/smoke.mjs",
-    "smoke:prod": "node scripts/smoke.mjs http://192.168.0.22:31010"
+    "smoke:prod": "node scripts/smoke.mjs http://192.168.0.22:31010",
+    "smoke:browser-demo": "node scripts/browser-demo-smoke.mjs",
+    "demo:seed-users": "node ops/seed-demo-users.mjs"
   },
   "engines": {
     "node": ">=22 <25"
@@ -35,6 +37,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
+    "playwright": "^1.61.1",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.10"

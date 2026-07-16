@@ -101,7 +101,7 @@ function parseCurrency(value: unknown) {
 
 function parseSectionCurrency(title: string) {
   const match = title.match(/\(([^)]+)\)/);
-  return parseCurrency(match?.[1] ?? "") ?? "RUB";
+  return parseCurrency(match?.[1] ?? "");
 }
 
 function looksLikeIsin(value: string) {
@@ -121,6 +121,31 @@ function operationTypeFromBcs(value: string) {
     if (pattern.test(value)) return type;
   }
   return "other";
+}
+
+function skippedRow(rowNumber: number, section: string, reason: string, raw: Record<string, unknown> = {}): ParsedBrokerImportRow {
+  return {
+    rowNumber,
+    raw: {
+      broker: "bcs",
+      section,
+      source_row_number: rowNumber,
+      skip_reason: reason,
+      ...raw,
+    },
+    normalized: {
+      row_type: "skipped",
+      reason,
+    },
+    status: "skipped",
+    errorMessage: null,
+  };
+}
+
+function snapshotStatus(snapshotDate: string | null, currency: string | null) {
+  if (!snapshotDate) return { status: "failed" as const, errorMessage: "Snapshot date was not found in report" };
+  if (!currency) return { status: "failed" as const, errorMessage: "Unknown report section currency" };
+  return { status: "normalized" as const, errorMessage: null };
 }
 
 function reportEndDate(rows: SheetRow[]) {
@@ -158,18 +183,23 @@ function parseCashOperations(rows: SheetRow[]) {
     if (/итого по валюте/i.test(first)) {
       const currencyMatch = first.match(/итого по валюте\s+(.+):?/i);
       currency = parseCurrency(currencyMatch?.[1]?.replace(/:$/, "") ?? "") ?? currency;
+      parsed.push(skippedRow(index + 1, "cash_operations", "Currency subtotal row", { label: first }));
       break;
     }
     if (/итого/i.test(operation) || /итого/i.test(first)) continue;
     if (!parseDate(first) || !operation) {
       if (isBlankRow(row)) break;
+      parsed.push(skippedRow(index + 1, "cash_operations", "Non-operation row", { row_text: rowText(row) }));
       continue;
     }
 
     const credit = parseNumber(row[5]);
     const debit = parseNumber(row[6]);
     const amount = credit ?? debit;
-    if (amount === null) continue;
+    if (amount === null) {
+      parsed.push(skippedRow(index + 1, "cash_operations", "Operation row without amount", { date: first, operation }));
+      continue;
+    }
 
     const note = cellText(row, 13);
     const isin = looksLikeIsin(note) ? note.toUpperCase() : null;
@@ -283,11 +313,16 @@ function parseHoldingSnapshots(rows: SheetRow[], snapshotDate: string | null) {
       const endMarketValue = parseNumber(row[12]);
       const issuer = cellText(row, 15);
 
-      if (endQuantity === null || endMarketValue === null) continue;
+      if (endQuantity === null || endMarketValue === null) {
+        parsed.push(skippedRow(rowIndex + 1, "holding_snapshots", "Holding row without quantity or market value", { asset_code: assetCode }));
+        continue;
+      }
 
       const ticker = assetCode.toUpperCase();
       const isin = looksLikeIsin(identifier) ? identifier.toUpperCase() : looksLikeIsin(ticker) ? ticker : null;
       const assetType = assetTypeFromBcs(assetTypeText);
+
+      const status = snapshotStatus(snapshotDate, currency);
 
       parsed.push({
         rowNumber: rowIndex + 1,
@@ -328,8 +363,8 @@ function parseHoldingSnapshots(rows: SheetRow[], snapshotDate: string | null) {
           security_identifier: identifier || null,
           custody_place: cellText(row, 14) || null,
         },
-        status: snapshotDate ? "normalized" : "failed",
-        errorMessage: snapshotDate ? null : "Snapshot date was not found in report",
+        status: status.status,
+        errorMessage: status.errorMessage,
       });
     }
   }

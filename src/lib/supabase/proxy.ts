@@ -14,10 +14,31 @@ const protectedPrefixes = [
   "/settings",
 ];
 
+function hasSupabaseAuthCookie(request: NextRequest) {
+  return request.cookies
+    .getAll()
+    .some(({ name }) => name.startsWith("sb-") && name.includes("auth-token"));
+}
+
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });
-  const { url, key } = getSupabaseServerConfig();
+  const isProtected = protectedPrefixes.some((prefix) =>
+    request.nextUrl.pathname.startsWith(prefix),
+  );
+  const hasAuthCookie = hasSupabaseAuthCookie(request);
 
+  if (isProtected && !hasAuthCookie) {
+    const loginUrl = request.nextUrl.clone();
+    loginUrl.pathname = "/login";
+    loginUrl.searchParams.set("next", request.nextUrl.pathname);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  if (!hasAuthCookie) {
+    return response;
+  }
+
+  const { url, key } = getSupabaseServerConfig();
   const supabase = createServerClient(url, key, {
     cookies: {
       getAll: () => request.cookies.getAll(),
@@ -37,9 +58,6 @@ export async function updateSession(request: NextRequest) {
   });
 
   const { data } = await supabase.auth.getClaims();
-  const isProtected = protectedPrefixes.some((prefix) =>
-    request.nextUrl.pathname.startsWith(prefix),
-  );
 
   if (isProtected && !data?.claims) {
     const loginUrl = request.nextUrl.clone();

@@ -150,3 +150,8 @@ RLS smoke-тесты лежат в [supabase/tests](./supabase/tests).
 - [ADR-001: стек и структура](../docs/adr/ADR-001-technology-stack-and-application-structure.md)
 - [ADR-002: модель данных и историчность](./docs/adr/ADR-002-data-model-and-history.md)
 - [Приёмка и smoke этапа 1](./docs/stage-1-acceptance-and-smoke.md)
+
+## Документация этапа 4
+
+- [Dashboard и аналитика](./docs/stage-4-dashboard-analytics.md)
+- [Browser demo smoke](./docs/browser-demo-smoke.md)
