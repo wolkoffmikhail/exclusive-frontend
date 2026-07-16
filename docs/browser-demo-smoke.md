@@ -2,6 +2,8 @@
 
 The full browser demo smoke is an optional Playwright runner for the live demo flow through import, portfolio analytics, and read-only access checks.
 
+For a safe service-role workflow with Coolify, use [Coolify Service Role Runbook for Demo Smoke](./coolify-service-role-demo-smoke.md). The service-role key must be used only as a temporary environment variable and must not be saved in docs or repository files.
+
 It checks:
 
 - viewer login and read-only import access;
