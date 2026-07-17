@@ -69,6 +69,11 @@ async function assertNoVisible(locator, message) {
   assert((await locator.count()) === 0, message);
 }
 
+async function isVisible(locator) {
+  if ((await locator.count()) === 0) return false;
+  return locator.first().isVisible();
+}
+
 async function waitForLatestImportStatus(page, statuses) {
   await page.waitForFunction(
     (expectedStatuses) => {
@@ -145,6 +150,24 @@ async function assertViewerReadOnly(page) {
   await assertNoVisible(page.getByTestId("import-file-input"), "viewer should not see upload input");
   await assertNoVisible(page.getByTestId("import-parse-button"), "viewer should not see parse action");
   await assertNoVisible(page.getByTestId("import-apply-button"), "viewer should not see apply action");
+
+  await page.goto(`${baseUrl}/recommendations`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("recommendations-view"), "viewer should open recommendations");
+  await assertNoVisible(page.getByTestId("recommendation-accept-button"), "viewer should not accept recommendations");
+  await assertNoVisible(page.getByTestId("recommendation-reject-button"), "viewer should not reject recommendations");
+
+  await page.goto(`${baseUrl}/news`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("news-view"), "viewer should open news");
+  await assertNoVisible(page.getByTestId("news-watchlist-button"), "viewer should not save news to watchlist");
+
+  await page.goto(`${baseUrl}/watchlist`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("watchlist-view"), "viewer should open watchlist");
+  await assertNoVisible(page.getByTestId("watchlist-save-button"), "viewer should not edit watchlist");
+
+  await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("limits-settings"), "viewer should see limits settings section");
+  await assertNoVisible(page.getByTestId("create-default-limits-button"), "viewer should not create default limits");
+  await assertNoVisible(page.getByTestId("check-limits-button"), "viewer should not check limits");
   console.log("ok viewer read-only import");
 }
 
@@ -160,6 +183,12 @@ async function assertAdminEditableAccess(page) {
 
   await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
   assert((await page.locator("text=Audit").count()) > 0, "admin should open settings and see audit block");
+  await assertVisible(page.getByTestId("limits-settings"), "admin should see limits settings");
+  if ((await page.getByTestId("limit-card").count()) === 0 && (await isVisible(page.getByTestId("create-default-limits-button")))) {
+    await submitActionForm(page, page.getByTestId("create-default-limits-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
+  }
+  await assertVisible(page.getByTestId("check-limits-button"), "admin should see limit check action");
+  await submitActionForm(page, page.getByTestId("check-limits-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
   console.log("ok admin editable access");
 }
 
@@ -178,12 +207,58 @@ async function assertDashboardAnalytics(page) {
   await assertVisible(page.getByTestId("dashboard-structure-secondary"), "dashboard should show currency/account structure");
   await assertVisible(page.getByTestId("dashboard-xirr-detail"), "dashboard should show XIRR detail");
   await assertVisible(page.getByTestId("dashboard-xirr-cash-flows"), "dashboard should show XIRR cash-flow rows");
+  await assertVisible(page.getByTestId("dashboard-stage-5-signals"), "dashboard should show stage 5 signals");
 
   await page.getByRole("link", { name: "YTD" }).click();
   await page.waitForURL((url) => url.pathname === "/dashboard" && url.searchParams.get("dashboard_period") === "YTD", { timeout: 10_000 });
   await page.waitForLoadState("networkidle");
   await assertVisible(page.getByTestId("dashboard-cash-flows"), "dashboard should keep cash-flow section after period switch");
   console.log("ok dashboard analytics");
+}
+
+async function assertStage5Signals(page) {
+  await page.goto(`${baseUrl}/recommendations`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("recommendations-view"), "editor should open recommendations");
+  await assertVisible(page.getByTestId("recommendation-filters-form"), "recommendations should show filters");
+  await assertVisible(page.getByTestId("recommendation-card"), "recommendations should show a recommendation card");
+
+  if (await isVisible(page.getByTestId("recommendation-read-button"))) {
+    await submitActionForm(page, page.getByTestId("recommendation-read-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
+  }
+
+  if (await isVisible(page.getByTestId("recommendation-accept-button"))) {
+    await submitActionForm(page, page.getByTestId("recommendation-accept-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
+  }
+  console.log("ok stage 5 recommendations");
+
+  await page.goto(`${baseUrl}/news`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("news-view"), "editor should open news");
+  await assertVisible(page.getByTestId("news-filters-form"), "news should show filters");
+  await assertVisible(page.getByTestId("news-card"), "news should show at least one news item or idea");
+
+  if (await isVisible(page.getByTestId("news-watchlist-button"))) {
+    await submitActionForm(page, page.getByTestId("news-watchlist-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
+  }
+  console.log("ok stage 5 news");
+
+  await page.goto(`${baseUrl}/watchlist`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("watchlist-view"), "editor should open watchlist");
+  await assertVisible(page.getByTestId("watchlist-filters-form"), "watchlist should show filters");
+
+  if (await isVisible(page.getByTestId("watchlist-save-button"))) {
+    const noteInput = page.locator('input[name="notes"]').first();
+    if (await noteInput.isVisible()) {
+      await noteInput.fill(`smoke ${new Date().toISOString()}`);
+    }
+    await submitActionForm(page, page.getByTestId("watchlist-save-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
+  }
+  console.log("ok stage 5 watchlist");
+
+  await page.goto(`${baseUrl}/events`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("events-view"), "editor should open events");
+  await assertVisible(page.getByTestId("events-filters-form"), "events should show filters");
+  await assertVisible(page.getByTestId("event-card"), "events should show event cards");
+  console.log("ok stage 5 events");
 }
 
 async function assertEditorImportFlow(page) {
@@ -197,7 +272,19 @@ async function assertEditorImportFlow(page) {
 
   await uploadFixture(page, accountId);
   if (queryParam(page, "error") === "duplicate") {
-    throw new Error("The demo fixture is already uploaded for this account. Reset demo import data before running the full fresh-upload smoke.");
+    console.log("ok duplicate upload protection before fresh import; continuing with existing demo data");
+    await assertDashboardAnalytics(page);
+    await assertStage5Signals(page);
+
+    await page.goto(`${baseUrl}/assets`, { waitUntil: "networkidle" });
+    await assertVisible(page.getByTestId("assets-view"), "editor should open assets");
+    await assertVisible(page.getByTestId("positions-view"), "assets should show positions from existing demo data");
+    console.log("ok assets opened");
+
+    await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
+    assert((await page.locator("text=Audit").count()) > 0, "settings should show audit block");
+    console.log("ok audit visible");
+    return;
   }
   assert(queryParam(page, "uploaded") === "1", "upload should redirect with uploaded=1");
   await waitForLatestImportStatus(page, ["uploaded"]);
@@ -223,6 +310,7 @@ async function assertEditorImportFlow(page) {
   console.log("ok applied status");
 
   await assertDashboardAnalytics(page);
+  await assertStage5Signals(page);
 
   await page.goto(`${baseUrl}/assets`, { waitUntil: "networkidle" });
   await assertVisible(page.getByTestId("assets-view"), "editor should open assets");

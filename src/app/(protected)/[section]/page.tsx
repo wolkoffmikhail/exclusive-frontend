@@ -2,13 +2,16 @@ import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import type { PeriodKey, StructureSlice } from "@/lib/portfolio/analytics";
 import { getActiveFamily, getPortfolioData, type Account, type ImportJob, type Operation, type PortfolioData, type Position } from "@/lib/portfolio/data";
+import { filterPortfolioEvents, splitPortfolioEvents, type EventFilterInput } from "@/lib/portfolio/events";
 import { filterAndSortPositions, groupPositionsByAssetType, type PositionFilterInput } from "@/lib/portfolio/position-filters";
-import { canEditFamilyData } from "@/lib/portfolio/permissions";
+import { canEditFamilyData, canManageFamily } from "@/lib/portfolio/permissions";
+import { filterWatchlistItems, type WatchlistFilterInput } from "@/lib/portfolio/watchlist";
 import { createClient } from "@/lib/supabase/server";
 import { applyBrokerImport, deleteFailedImport, parseBrokerImport, restoreImportRow, skipImportRow, uploadBrokerReport } from "./import-actions";
 import { cancelManualOperation, createBuyOperation, createCashTransferOperation, createDepositOperation, createFxOperation, createSellOperation, createWithdrawalOperation } from "./manual-operation-actions";
 import { saveManualPositionPrice } from "./position-actions";
 import { createAccount, createPortfolio } from "./settings-actions";
+import { addAssetToWatchlist, addNewsToWatchlist, archiveLimit, archiveWatchlistItem, checkLimits, createDefaultLimits, createLimit, createNewsItem, createPortfolioEvent, markRecommendationRead, saveMaxSettings, saveRecommendationToWatchlist, saveTelegramSettings, testMaxNotification, testTelegramNotification, updateLimit, updatePortfolioEvent, updateRecommendationStatus, updateWatchlistItem } from "./stage5-actions";
 
 const sections: Record<string, { title: string; description: string }> = {
   dashboard: { title: "Обзор портфеля", description: "Структура семейного портфеля, счета, активы и ближайшие действия." },
@@ -23,6 +26,17 @@ const sections: Record<string, { title: string; description: string }> = {
 };
 
 export const dynamic = "force-dynamic";
+
+type RecommendationFilterInput = {
+  status?: string;
+  priority?: string;
+  assetId?: string;
+  sort?: string;
+};
+
+type NewsFilterInput = {
+  view?: string;
+};
 
 export function generateStaticParams() {
   return Object.keys(sections).map((section) => ({ section }));
@@ -171,6 +185,128 @@ function xirrFlowKindLabel(kind: string) {
   return labels[kind] ?? kind;
 }
 
+function recommendationPriorityLabel(priority: string) {
+  const labels: Record<string, string> = {
+    low: "низкий",
+    normal: "обычный",
+    high: "важный",
+    critical: "критичный",
+  };
+  return labels[priority] ?? priority;
+}
+
+function recommendationStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    draft: "черновик",
+    open: "активна",
+    accepted: "принята",
+    rejected: "отклонена",
+    archived: "архив",
+  };
+  return labels[status] ?? status;
+}
+
+function recommendationTypeLabel(type: string) {
+  const labels: Record<string, string> = {
+    asset_class_concentration: "концентрация класса",
+    single_asset_concentration: "концентрация актива",
+    currency_concentration: "валютный риск",
+    missing_market_price: "качество данных",
+    cash_below_threshold: "низкий кэш",
+    cash_above_threshold: "высокий кэш",
+    xirr_unavailable: "доходность",
+    large_external_flow: "денежный поток",
+    upcoming_position_event: "ближайшее событие",
+    manual: "ручная рекомендация",
+  };
+  return labels[type] ?? type;
+}
+
+function recommendationMetricLabel(recommendation: PortfolioData["recommendations"][number]) {
+  const metrics = recommendation.metrics;
+  const currency = typeof metrics.base_currency === "string" ? metrics.base_currency : typeof metrics.currency === "string" ? metrics.currency : "RUB";
+
+  if (typeof metrics.quality_alert_code === "string") return `Качество данных: ${metrics.quality_alert_code.replaceAll("_", " ")}`;
+  if (typeof metrics.share_percent === "number") return `Доля: ${formatNumber(metrics.share_percent)}%`;
+  if (typeof metrics.cash_share_percent === "number") return `Кэш: ${formatNumber(metrics.cash_share_percent)}%`;
+  if (typeof metrics.net_flow_share_percent === "number") return `Net flow: ${formatNumber(metrics.net_flow_share_percent)}%`;
+  if (typeof metrics.days_until === "number") return `До события: ${formatNumber(metrics.days_until, 0)} дн.`;
+  if (typeof metrics.book_value === "number") return `Баланс: ${formatMoney(metrics.book_value, currency)}`;
+  if (typeof metrics.value === "number") return `Оценка: ${formatMoney(metrics.value, currency)}`;
+  if (typeof metrics.xirr_status === "string") return `XIRR: ${xirrStatusLabel(metrics.xirr_status)}`;
+
+  return null;
+}
+
+function newsKindLabel(kind: string) {
+  const labels: Record<string, string> = {
+    portfolio_news: "по портфелю",
+    market_news: "рынок",
+    idea: "идея",
+  };
+  return labels[kind] ?? kind;
+}
+
+function watchlistStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    watching: "наблюдаем",
+    considering: "изучаем",
+    done: "разобрано",
+    archived: "архив",
+  };
+  return labels[status] ?? status;
+}
+
+function eventTypeLabel(type: string) {
+  const labels: Record<string, string> = {
+    dividend: "дивиденд",
+    coupon: "купон",
+    redemption: "погашение",
+  };
+  return labels[type] ?? type;
+}
+
+function limitTypeLabel(type: string) {
+  const labels: Record<string, string> = {
+    asset_share: "Доля актива",
+    asset_class_share: "Доля класса",
+    currency_share: "Доля валюты",
+    cash_min_share: "Кэш минимум",
+    cash_max_share: "Кэш максимум",
+  };
+  return labels[type] ?? type;
+}
+
+function limitDirectionLabel(direction: string) {
+  if (direction === "min") return "минимум";
+  if (direction === "max") return "максимум";
+  return direction;
+}
+
+function severityLabel(severity: string) {
+  const labels: Record<string, string> = {
+    info: "info",
+    warning: "warning",
+    critical: "critical",
+  };
+  return labels[severity] ?? severity;
+}
+
+function formatDate(value: string | null | undefined) {
+  if (!value) return "—";
+  const date = new Date(`${value.slice(0, 10)}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(date);
+}
+
+function isGeneratedRecommendation(id: string) {
+  return id.startsWith("generated:");
+}
+
 function DonutChart({ baseCurrency, slices }: { baseCurrency: string; slices: StructureSlice[] }) {
   const colors = ["#2563eb", "#16a34a", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2", "#4b5563"];
   const radius = 42;
@@ -257,7 +393,16 @@ function DashboardView({ data, dashboardPeriod }: { data: PortfolioData; dashboa
   const baseCurrency = analytics.baseCurrency;
   const currentPeriod = analytics.cashFlowPeriods.find((period) => period.period === dashboardPeriod) ?? analytics.cashFlowPeriods[0];
   const accountById = new Map(data.accounts.map((account) => [account.id, account]));
+  const assetById = new Map(data.assets.map((asset) => [asset.id, asset]));
   const canEdit = canEditFamilyData(data.family?.role);
+  const topRecommendations = data.recommendations
+    .filter((recommendation) => recommendation.status === "open")
+    .slice(0, 3);
+  const latestNews = data.newsItems.slice(0, 5);
+  const today = todayIsoDate();
+  const upcomingEvents = data.events
+    .filter((event) => event.status !== "cancelled" && event.event_date >= today)
+    .slice(0, 4);
 
   return (
     <div className="space-y-8" data-testid="dashboard-view">
@@ -282,6 +427,94 @@ function DashboardView({ data, dashboardPeriod }: { data: PortfolioData; dashboa
               <span className="mt-1 block text-amber-900">{alert.message}</span>
             </Link>
           ))}
+        </section>
+      )}
+
+      {data.systemAlerts.length > 0 && (
+        <section className="grid gap-3 md:grid-cols-2" data-testid="dashboard-system-alerts">
+          {data.systemAlerts.slice(0, 4).map((alert) => {
+            const href = typeof alert.payload.href === "string" ? alert.payload.href : "/settings";
+            return (
+              <Link
+                className={`rounded-3xl border p-4 text-sm ${alert.severity === "critical" ? "border-red-200 bg-red-50 text-red-950" : "border-amber-200 bg-amber-50 text-amber-950"}`}
+                href={href}
+                key={alert.id}
+              >
+                <span className="block font-medium">{alert.title}</span>
+                <span className="mt-1 block opacity-80">{severityLabel(alert.severity)} · {alert.condition_type}</span>
+              </Link>
+            );
+          })}
+        </section>
+      )}
+
+      {(topRecommendations.length > 0 || latestNews.length > 0 || upcomingEvents.length > 0 || data.systemAlerts.length > 0) && (
+        <section className="grid gap-6 xl:grid-cols-3" data-testid="dashboard-stage-5-signals">
+          <div className="rounded-3xl border border-border bg-surface p-6">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold">Рекомендации</h2>
+                <p className="mt-1 text-sm text-muted">Главные сигналы для проверки.</p>
+              </div>
+              <Link className="text-sm font-medium text-accent" href="/recommendations">Все</Link>
+            </div>
+            <div className="mt-5 space-y-3">
+              {topRecommendations.map((recommendation) => (
+                <Link className="block rounded-2xl border border-border bg-background p-4" href="/recommendations" key={recommendation.id}>
+                  <span className="text-xs font-medium uppercase text-muted">{recommendationPriorityLabel(recommendation.priority)}</span>
+                  <span className="mt-2 block font-medium">{recommendation.title}</span>
+                  <span className="mt-1 block text-sm text-muted">{recommendation.reason ?? recommendationTypeLabel(recommendation.recommendation_type)}</span>
+                  {recommendationMetricLabel(recommendation) && (
+                    <span className="mt-2 block text-xs font-medium text-accent">{recommendationMetricLabel(recommendation)}</span>
+                  )}
+                </Link>
+              ))}
+              {topRecommendations.length === 0 && <div className="text-sm text-muted">Активных рекомендаций пока нет.</div>}
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-border bg-surface p-6">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold">Новости</h2>
+                <p className="mt-1 text-sm text-muted">Последние новости и идеи.</p>
+              </div>
+              <Link className="text-sm font-medium text-accent" href="/news">Все</Link>
+            </div>
+            <div className="mt-5 space-y-3">
+              {latestNews.slice(0, 3).map((newsItem) => (
+                <Link className="block rounded-2xl border border-border bg-background p-4" href="/news" key={newsItem.id}>
+                  <span className="text-xs text-muted">{newsItem.source} · {formatDateTime(newsItem.published_at)}</span>
+                  <span className="mt-2 block font-medium">{newsItem.title}</span>
+                  <span className="mt-1 block text-sm text-muted">{newsItem.asset_id ? assetById.get(newsItem.asset_id)?.name ?? "Актив" : newsKindLabel(newsItem.kind)}</span>
+                </Link>
+              ))}
+              {latestNews.length === 0 && <div className="text-sm text-muted">Источник новостей пока не заполнен.</div>}
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-border bg-surface p-6">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold">События</h2>
+                <p className="mt-1 text-sm text-muted">Ближайшие дивиденды, купоны и погашения.</p>
+              </div>
+              <Link className="text-sm font-medium text-accent" href="/events">Все</Link>
+            </div>
+            <div className="mt-5 space-y-3">
+              {upcomingEvents.slice(0, 3).map((event) => (
+                <Link className="block rounded-2xl border border-border bg-background p-4" href="/events" key={event.id}>
+                  <span className="text-xs text-muted">{formatDate(event.event_date)} · {eventTypeLabel(event.event_type)}</span>
+                  <span className="mt-2 block font-medium">{event.title}</span>
+                  <span className="mt-1 block text-sm text-muted">
+                    {event.asset_id ? assetById.get(event.asset_id)?.name ?? "Актив" : "Без привязки"}
+                    {event.amount !== null && event.currency_code ? ` · ${formatMoney(event.amount, event.currency_code)}` : ""}
+                  </span>
+                </Link>
+              ))}
+              {upcomingEvents.length === 0 && <div className="text-sm text-muted">Будущих событий пока нет.</div>}
+            </div>
+          </div>
         </section>
       )}
 
@@ -1133,6 +1366,8 @@ function AssetDetailView({ asset, data }: { asset: PortfolioData["assets"][numbe
     .filter((value): value is string => Boolean(value))
     .sort()
     .at(-1);
+  const isWatched = data.watchlistItems.some((item) => item.item_type === "asset" && item.asset_id === asset.id);
+  const canEdit = canEditFamilyData(data.family?.role);
 
   return (
     <section className="space-y-6 rounded-3xl border border-border bg-surface p-6" data-testid="asset-detail">
@@ -1144,7 +1379,19 @@ function AssetDetailView({ asset, data }: { asset: PortfolioData["assets"][numbe
             {asset.ticker ?? "Без тикера"} · {asset.isin ?? "ISIN не указан"} · {asset.market ?? "рынок не указан"}
           </p>
         </div>
-        <Link className="rounded-2xl border border-border px-4 py-2 text-sm font-medium text-muted" href="/assets">Закрыть карточку</Link>
+        <div className="flex flex-wrap gap-2">
+          {canEdit && !isWatched && (
+            <form action={addAssetToWatchlist}>
+              <input name="return_to" type="hidden" value="/assets" />
+              <input name="asset_id" type="hidden" value={asset.id} />
+              <button className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" type="submit">
+                В watchlist
+              </button>
+            </form>
+          )}
+          {isWatched && <span className="rounded-2xl bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700">В watchlist</span>}
+          <Link className="rounded-2xl border border-border px-4 py-2 text-sm font-medium text-muted" href="/assets">Закрыть карточку</Link>
+        </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-5">
@@ -1231,6 +1478,8 @@ function AssetsView({
   const filteredPositions = filterAndSortPositions(positions, positionFilters);
   const assetTypes = Array.from(new Set(positions.map((position) => position.asset_type_code).filter((value): value is string => Boolean(value)))).sort();
   const currencies = Array.from(new Set(positions.map((position) => position.currency_code))).sort();
+  const canEdit = canEditFamilyData(data.family?.role);
+  const watchedAssetIds = new Set(data.watchlistItems.filter((item) => item.item_type === "asset").map((item) => item.asset_id).filter(Boolean));
 
   return (
     <div className="space-y-6" data-testid="assets-view">
@@ -1239,7 +1488,7 @@ function AssetsView({
       <ManualOperationsPanel data={data} returnTo="/assets" />
       {selectedAsset && <AssetDetailView asset={selectedAsset} data={data} />}
       <PositionFiltersForm accounts={data.accounts} assetTypes={assetTypes} currencies={currencies} filters={positionFilters} />
-      <PositionsView canEdit={canEditFamilyData(data.family?.role)} positions={filteredPositions} />
+      <PositionsView canEdit={canEdit} positions={filteredPositions} />
       {assets.length === 0 ? <EmptyState text="Активы пока не созданы." /> : (
       <div className="overflow-hidden rounded-3xl border border-border bg-surface">
         <div className="border-b border-border p-6">
@@ -1255,6 +1504,7 @@ function AssetsView({
               <th className="px-5 py-4 font-medium">ISIN</th>
               <th className="px-5 py-4 font-medium">Рынок</th>
               <th className="px-5 py-4 font-medium">Валюта</th>
+              <th className="px-5 py-4 font-medium">Watchlist</th>
             </tr>
           </thead>
           <tbody>
@@ -1270,6 +1520,19 @@ function AssetsView({
                   <Link className="mt-2 block text-xs font-medium text-accent" href={`/assets?asset_id=${encodeURIComponent(asset.id)}`}>
                     Открыть карточку
                   </Link>
+                </td>
+                <td className="px-5 py-4">
+                  {watchedAssetIds.has(asset.id) ? (
+                    <span className="rounded-xl bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">В watchlist</span>
+                  ) : canEdit ? (
+                    <form action={addAssetToWatchlist}>
+                      <input name="return_to" type="hidden" value="/assets" />
+                      <input name="asset_id" type="hidden" value={asset.id} />
+                      <button className="rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium" type="submit">
+                        Добавить
+                      </button>
+                    </form>
+                  ) : "—"}
                 </td>
               </tr>
             ))}
@@ -1861,12 +2124,358 @@ function AuditLogView({ entries }: { entries: PortfolioData["auditLog"] }) {
   );
 }
 
-function SettingsView({ data, settingsError, settingsSaved }: { data: PortfolioData; settingsError?: string; settingsSaved?: string }) {
+function LimitScopeSelect({ assets, defaultValue = "" }: { assets: PortfolioData["assets"]; defaultValue?: string | null }) {
+  const assetTypes = Array.from(new Set(assets.map((asset) => asset.asset_type_code))).filter(Boolean).sort();
+  const currencies = Array.from(new Set(assets.map((asset) => asset.currency_code).filter(Boolean))).sort();
+
+  return (
+    <label className="grid gap-2 text-sm">
+      <span className="font-medium">Scope key</span>
+      <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={defaultValue ?? ""} list="limit-scope-options" name="scope_key" placeholder="stock, RUB или asset_id" />
+      <datalist id="limit-scope-options">
+        {assetTypes.map((type) => <option key={`type-${type}`} value={type} />)}
+        {currencies.map((currency) => <option key={`currency-${currency}`} value={currency ?? ""} />)}
+        {assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}
+      </datalist>
+    </label>
+  );
+}
+
+function LimitsSettingsView({ data }: { data: PortfolioData }) {
+  const canManage = canManageFamily(data.family?.role);
+  const activeLimitAlerts = data.systemAlerts.filter((alert) => alert.source === "limits");
+
+  return (
+    <section className="rounded-3xl border border-border bg-surface p-6" data-testid="limits-settings">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">Лимиты и алерты</h2>
+          <p className="mt-2 text-sm text-muted">Пороги проверяются по текущей аналитике портфеля и создают системные алерты без дублей.</p>
+        </div>
+        {canManage && (
+          <div className="flex flex-wrap gap-2">
+            <form action={createDefaultLimits}>
+              <input name="return_to" type="hidden" value="/settings" />
+              <button className="rounded-2xl border border-border px-4 py-2 text-sm font-medium" data-testid="create-default-limits-button" type="submit">
+                Создать базовые
+              </button>
+            </form>
+            <form action={checkLimits}>
+              <input name="return_to" type="hidden" value="/settings" />
+              <button className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" data-testid="check-limits-button" type="submit">
+                Проверить лимиты
+              </button>
+            </form>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-5 grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <div>
+          <h3 className="text-sm font-semibold">Активные лимиты</h3>
+          <div className="mt-3 space-y-3">
+            {data.limits.map((limit) => (
+              <div className="rounded-2xl border border-border bg-background p-4" data-testid="limit-card" key={limit.id}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="font-medium">{limitTypeLabel(limit.limit_type)}</p>
+                    <p className="mt-1 text-sm text-muted">
+                      {limitDirectionLabel(limit.direction)} {formatPercent(Number(limit.threshold_value))} · {limit.scope_key ?? "портфель"} · {severityLabel(limit.severity)}
+                    </p>
+                  </div>
+                  {canManage && (
+                    <form action={archiveLimit}>
+                      <input name="return_to" type="hidden" value="/settings" />
+                      <input name="limit_id" type="hidden" value={limit.id} />
+                      <button className="rounded-xl border border-border px-3 py-2 text-xs font-medium text-muted" type="submit">
+                        Архив
+                      </button>
+                    </form>
+                  )}
+                </div>
+                {canManage && (
+                  <form action={updateLimit} className="mt-4 grid gap-3 border-t border-border pt-4">
+                    <input name="return_to" type="hidden" value="/settings" />
+                    <input name="limit_id" type="hidden" value={limit.id} />
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <label className="grid gap-2 text-xs">
+                        <span className="font-medium">Тип</span>
+                        <select className="h-9 rounded-xl border border-border bg-background px-3 text-xs" name="limit_type" defaultValue={limit.limit_type}>
+                          <option value="asset_class_share">Доля класса</option>
+                          <option value="currency_share">Доля валюты</option>
+                          <option value="asset_share">Доля актива</option>
+                          <option value="cash_min_share">Кэш минимум</option>
+                          <option value="cash_max_share">Кэш максимум</option>
+                        </select>
+                      </label>
+                      <label className="grid gap-2 text-xs">
+                        <span className="font-medium">Направление</span>
+                        <select className="h-9 rounded-xl border border-border bg-background px-3 text-xs" name="direction" defaultValue={limit.direction}>
+                          <option value="max">Максимум</option>
+                          <option value="min">Минимум</option>
+                        </select>
+                      </label>
+                      <label className="grid gap-2 text-xs">
+                        <span className="font-medium">Важность</span>
+                        <select className="h-9 rounded-xl border border-border bg-background px-3 text-xs" name="severity" defaultValue={limit.severity}>
+                          <option value="warning">Warning</option>
+                          <option value="critical">Critical</option>
+                          <option value="info">Info</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-[1fr_160px_auto]">
+                      <label className="grid gap-2 text-xs">
+                        <span className="font-medium">Scope key</span>
+                        <input className="h-9 rounded-xl border border-border bg-background px-3 text-xs" defaultValue={limit.scope_key ?? ""} list="limit-scope-options" name="scope_key" placeholder="stock, RUB или asset_id" />
+                      </label>
+                      <label className="grid gap-2 text-xs">
+                        <span className="font-medium">Порог</span>
+                        <input className="h-9 rounded-xl border border-border bg-background px-3 text-xs" defaultValue={Number(limit.threshold_value)} name="threshold_value" required step="0.0001" type="number" />
+                      </label>
+                      <button className="self-end rounded-xl bg-accent px-3 py-2 text-xs font-medium text-white" type="submit">
+                        Обновить
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            ))}
+            {data.limits.length === 0 && <EmptyState text="Активных лимитов пока нет." />}
+          </div>
+        </div>
+
+        <div>
+          <h3 className="text-sm font-semibold">Активные алерты</h3>
+          <div className="mt-3 space-y-3">
+            {activeLimitAlerts.map((alert) => (
+              <div className={`rounded-2xl border p-4 ${alert.severity === "critical" ? "border-red-200 bg-red-50 text-red-950" : "border-amber-200 bg-amber-50 text-amber-950"}`} data-testid="limit-alert-card" key={alert.id}>
+                <p className="font-medium">{alert.title}</p>
+                <p className="mt-1 text-sm opacity-80">
+                  {severityLabel(alert.severity)} · {alert.condition_type} · проверено {formatDateTime(alert.last_checked_at)}
+                </p>
+              </div>
+            ))}
+            {activeLimitAlerts.length === 0 && <EmptyState text="Активных limit-алертов пока нет." />}
+          </div>
+        </div>
+      </div>
+
+      {canManage && (
+        <form action={createLimit} className="mt-6 grid gap-3 rounded-2xl border border-border bg-background p-4">
+          <input name="return_to" type="hidden" value="/settings" />
+          <div className="grid gap-3 md:grid-cols-3">
+            <label className="grid gap-2 text-sm">
+              <span className="font-medium">Тип лимита</span>
+              <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="limit_type" required>
+                <option value="asset_class_share">Доля класса</option>
+                <option value="currency_share">Доля валюты</option>
+                <option value="asset_share">Доля актива</option>
+                <option value="cash_min_share">Кэш минимум</option>
+                <option value="cash_max_share">Кэш максимум</option>
+              </select>
+            </label>
+            <label className="grid gap-2 text-sm">
+              <span className="font-medium">Направление</span>
+              <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="direction" required>
+                <option value="max">Максимум</option>
+                <option value="min">Минимум</option>
+              </select>
+            </label>
+            <label className="grid gap-2 text-sm">
+              <span className="font-medium">Важность</span>
+              <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="severity" required>
+                <option value="warning">Warning</option>
+                <option value="critical">Critical</option>
+                <option value="info">Info</option>
+              </select>
+            </label>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <LimitScopeSelect assets={data.assets} />
+            <label className="grid gap-2 text-sm">
+              <span className="font-medium">Порог</span>
+              <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="threshold_value" placeholder="0.35 или 35" required step="0.0001" type="number" />
+            </label>
+          </div>
+          <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" type="submit">
+            Создать лимит
+          </button>
+        </form>
+      )}
+    </section>
+  );
+}
+
+function TelegramSettingsView({ data }: { data: PortfolioData }) {
+  const canManage = canManageFamily(data.family?.role);
+  const telegram = data.notificationPreferences.find((preference) => preference.channel === "telegram");
+  const settings = telegram?.settings ?? {};
+  const chatId = typeof settings.chat_id === "string" ? settings.chat_id : "";
+  const messageThreadId = typeof settings.message_thread_id === "string" ? settings.message_thread_id : "";
+  const deliveries = data.notificationDeliveries.filter((delivery) => delivery.channel === "telegram").slice(0, 6);
+
+  return (
+    <section className="rounded-3xl border border-border bg-surface p-6" data-testid="telegram-settings">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">Telegram</h2>
+          <p className="mt-2 text-sm text-muted">Уведомления отправляются сервером через `TELEGRAM_BOT_TOKEN`; токен не хранится в UI.</p>
+        </div>
+        <span className={`rounded-full px-3 py-1 text-xs font-medium ${telegram?.status === "enabled" ? "bg-emerald-50 text-emerald-700" : "bg-background text-muted"}`}>
+          {telegram?.status === "enabled" ? "enabled" : "disabled"}
+        </span>
+      </div>
+
+      {canManage && (
+        <div className="mt-5 grid gap-4 xl:grid-cols-[1fr_auto]">
+          <form action={saveTelegramSettings} className="grid gap-3 rounded-2xl border border-border bg-background p-4">
+            <input name="return_to" type="hidden" value="/settings" />
+            <div className="grid gap-3 md:grid-cols-3">
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Статус</span>
+                <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="status" defaultValue={telegram?.status ?? "disabled"}>
+                  <option value="enabled">Enabled</option>
+                  <option value="disabled">Disabled</option>
+                </select>
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Chat ID</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={chatId} name="chat_id" placeholder="-100..." />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Thread ID</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={messageThreadId} name="message_thread_id" placeholder="Опционально" />
+              </label>
+            </div>
+            <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" type="submit">
+              Сохранить Telegram
+            </button>
+          </form>
+
+          <form action={testTelegramNotification} className="rounded-2xl border border-border bg-background p-4">
+            <input name="return_to" type="hidden" value="/settings" />
+            <button className="h-11 rounded-2xl border border-border px-5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50" disabled={telegram?.status !== "enabled"} type="submit">
+              Тестовая отправка
+            </button>
+            <p className="mt-3 max-w-64 text-xs text-muted">Если env `TELEGRAM_BOT_TOKEN` не задан, доставка будет записана как skipped.</p>
+          </form>
+        </div>
+      )}
+
+      <div className="mt-5">
+        <h3 className="text-sm font-semibold">Последние доставки</h3>
+        <div className="mt-3 space-y-3">
+          {deliveries.map((delivery) => (
+            <div className="rounded-2xl border border-border bg-background p-4" key={delivery.id}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="font-medium">{delivery.status}</p>
+                  <p className="mt-1 text-sm text-muted">{delivery.error_message ?? "без ошибки"}</p>
+                </div>
+                <span className="text-xs text-muted">{formatDateTime(delivery.sent_at ?? delivery.created_at)}</span>
+              </div>
+            </div>
+          ))}
+          {deliveries.length === 0 && <EmptyState text="Доставок Telegram пока нет." />}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MaxSettingsView({ data }: { data: PortfolioData }) {
+  const canManage = canManageFamily(data.family?.role);
+  const max = data.notificationPreferences.find((preference) => preference.channel === "max");
+  const settings = max?.settings ?? {};
+  const recipientType = settings.recipient_type === "chat" ? "chat" : "user";
+  const userId = typeof settings.user_id === "string" ? settings.user_id : "";
+  const chatId = typeof settings.chat_id === "string" ? settings.chat_id : "";
+  const deliveries = data.notificationDeliveries.filter((delivery) => delivery.channel === "max").slice(0, 6);
+
+  return (
+    <section className="rounded-3xl border border-border bg-surface p-6" data-testid="max-settings">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">MAX</h2>
+          <p className="mt-2 text-sm text-muted">Уведомления отправляются сервером через `MAX_BOT_TOKEN`; токен не хранится в UI.</p>
+        </div>
+        <span className={`rounded-full px-3 py-1 text-xs font-medium ${max?.status === "enabled" ? "bg-emerald-50 text-emerald-700" : "bg-background text-muted"}`}>
+          {max?.status === "enabled" ? "enabled" : "disabled"}
+        </span>
+      </div>
+
+      {canManage && (
+        <div className="mt-5 grid gap-4 xl:grid-cols-[1fr_auto]">
+          <form action={saveMaxSettings} className="grid gap-3 rounded-2xl border border-border bg-background p-4">
+            <input name="return_to" type="hidden" value="/settings" />
+            <div className="grid gap-3 md:grid-cols-4">
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Статус</span>
+                <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="status" defaultValue={max?.status ?? "disabled"}>
+                  <option value="enabled">Enabled</option>
+                  <option value="disabled">Disabled</option>
+                </select>
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Получатель</span>
+                <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="recipient_type" defaultValue={recipientType}>
+                  <option value="user">User ID</option>
+                  <option value="chat">Chat ID</option>
+                </select>
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">User ID</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={userId} name="user_id" placeholder="Опционально" />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Chat ID</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={chatId} name="chat_id" placeholder="Опционально" />
+              </label>
+            </div>
+            <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" type="submit">
+              Сохранить MAX
+            </button>
+          </form>
+
+          <form action={testMaxNotification} className="rounded-2xl border border-border bg-background p-4">
+            <input name="return_to" type="hidden" value="/settings" />
+            <button className="h-11 rounded-2xl border border-border px-5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50" disabled={max?.status !== "enabled"} type="submit">
+              Тестовая отправка
+            </button>
+            <p className="mt-3 max-w-64 text-xs text-muted">Если env `MAX_BOT_TOKEN` не задан, доставка будет записана как skipped.</p>
+          </form>
+        </div>
+      )}
+
+      <div className="mt-5">
+        <h3 className="text-sm font-semibold">Последние доставки</h3>
+        <div className="mt-3 space-y-3">
+          {deliveries.map((delivery) => (
+            <div className="rounded-2xl border border-border bg-background p-4" key={delivery.id}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="font-medium">{delivery.status}</p>
+                  <p className="mt-1 text-sm text-muted">{delivery.error_message ?? "без ошибки"}</p>
+                </div>
+                <span className="text-xs text-muted">{formatDateTime(delivery.sent_at ?? delivery.created_at)}</span>
+              </div>
+            </div>
+          ))}
+          {deliveries.length === 0 && <EmptyState text="Доставок MAX пока нет." />}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SettingsView({ data, settingsError, settingsSaved, stage5Error, stage5Saved }: { data: PortfolioData; settingsError?: string; settingsSaved?: string; stage5Error?: string; stage5Saved?: string }) {
   const canEdit = canEditFamilyData(data.family?.role);
 
   return (
     <div className="space-y-6">
       <SettingsNotice settingsError={settingsError} settingsSaved={settingsSaved} />
+      <Stage5Notice stage5Error={stage5Error} stage5Saved={stage5Saved} />
 
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard label="Семья" value={data.family?.name ?? "—"} hint={`Ваша роль: ${data.family?.role ?? "—"}`} />
@@ -1939,7 +2548,797 @@ function SettingsView({ data, settingsError, settingsSaved }: { data: PortfolioD
         </div>
       </section>
 
+      <LimitsSettingsView data={data} />
+      <TelegramSettingsView data={data} />
+      <MaxSettingsView data={data} />
       <AuditLogView entries={data.auditLog} />
+    </div>
+  );
+}
+
+function RecommendationMetrics({ metrics }: { metrics: Record<string, unknown> }) {
+  const entries = Object.entries(metrics).filter(([, value]) => value !== null && value !== undefined);
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="mt-4 grid gap-2 md:grid-cols-3">
+      {entries.slice(0, 6).map(([key, value]) => (
+        <div className="rounded-2xl border border-border bg-surface px-3 py-2" key={key}>
+          <p className="text-[11px] uppercase text-muted">{key.replaceAll("_", " ")}</p>
+          <p className="mt-1 truncate text-sm font-medium">{String(value)}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Stage5Notice({ stage5Error, stage5Saved }: { stage5Error?: string; stage5Saved?: string }) {
+  const errors: Record<string, string> = {
+    "no-family": "Для пользователя не назначена семья.",
+    forbidden: "У роли viewer нет права изменять данные этого раздела.",
+    "asset-not-found": "Связанный актив не найден в текущей семье.",
+    "asset-required": "Не выбран актив для сохранения.",
+    "news-title-required": "Укажите заголовок новости или идеи.",
+    "news-source-required": "Укажите источник новости или идеи.",
+    "news-kind-invalid": "Некорректный тип новости.",
+    "news-required": "Не выбрана новость для сохранения.",
+    "news-not-found": "Новость не найдена.",
+    "recommendation-not-found": "Рекомендация не найдена.",
+    "recommendation-generated-invalid": "Generated-рекомендацию не удалось сохранить: не хватает данных.",
+    "recommendation-status-invalid": "Некорректный статус рекомендации.",
+    "watchlist-required": "Не выбран элемент watchlist.",
+    "watchlist-status-invalid": "Некорректный статус watchlist.",
+    "watchlist-not-found": "Элемент watchlist не найден.",
+    "event-required": "Не выбрано событие.",
+    "event-title-required": "Укажите название события.",
+    "event-type-invalid": "Некорректный тип события.",
+    "event-status-invalid": "Некорректный статус события.",
+    "event-date-invalid": "Некорректная дата события.",
+    "event-amount-invalid": "Некорректная сумма события.",
+    "currency-invalid": "Валюта должна быть в формате RUB, USD, EUR.",
+    "limit-type-invalid": "Некорректный тип лимита.",
+    "limit-direction-invalid": "Некорректное направление лимита.",
+    "limit-severity-invalid": "Некорректная важность лимита.",
+    "limit-threshold-invalid": "Укажите корректный порог лимита.",
+    "limit-scope-required": "Для этого типа лимита нужен scope key.",
+    "limit-required": "Не выбран лимит.",
+    "limit-not-found": "Лимит не найден.",
+    "telegram-status-invalid": "Некорректный статус Telegram.",
+    "telegram-chat-required": "Для включения Telegram нужен chat id.",
+    "telegram-not-enabled": "Telegram не включен для этой семьи.",
+    "max-status-invalid": "Некорректный статус MAX.",
+    "max-recipient-invalid": "Некорректный тип получателя MAX.",
+    "max-user-required": "Для включения MAX с User ID нужен user id.",
+    "max-chat-required": "Для включения MAX с Chat ID нужен chat id.",
+    "max-not-enabled": "MAX не включен для этой семьи.",
+  };
+  const saved: Record<string, string> = {
+    news: "Новость или идея сохранена.",
+    "watchlist-news": "Материал добавлен в watchlist.",
+    "watchlist-asset": "Актив добавлен в watchlist.",
+    "watchlist-recommendation": "Рекомендация добавлена в watchlist.",
+    "recommendation-status": "Статус рекомендации обновлен.",
+    "recommendation-read": "Факт просмотра рекомендации сохранён.",
+    watchlist: "Watchlist обновлен.",
+    "watchlist-archived": "Элемент watchlist архивирован.",
+    event: "Событие создано.",
+    "event-updated": "Событие обновлено.",
+    limit: "Лимит создан.",
+    "limit-updated": "Лимит обновлён.",
+    "limit-archived": "Лимит архивирован.",
+    "limits-template": "Базовые лимиты созданы.",
+    "limits-template-empty": "Базовые лимиты уже были созданы ранее.",
+    "limits-checked": "Лимиты проверены, активных нарушений нет.",
+    "limits-checked-partial": "Лимиты проверены частично: часть метрик недоступна или неполная. Подробности записаны в audit log.",
+    "limits-checked-with-alerts": "Лимиты проверены, активные алерты обновлены.",
+    "telegram-settings": "Настройки Telegram сохранены.",
+    "telegram-test-sent": "Тестовое Telegram-уведомление отправлено.",
+    "telegram-test-skipped": "Тестовая Telegram-доставка пропущена. Проверьте chat id и `TELEGRAM_BOT_TOKEN`.",
+    "telegram-test-failed": "Тестовая Telegram-доставка завершилась ошибкой. Подробности записаны в доставки.",
+    "max-settings": "Настройки MAX сохранены.",
+    "max-test-sent": "Тестовое MAX-уведомление отправлено.",
+    "max-test-skipped": "Тестовая MAX-доставка пропущена. Проверьте получателя и `MAX_BOT_TOKEN`.",
+    "max-test-failed": "Тестовая MAX-доставка завершилась ошибкой. Подробности записаны в доставки.",
+  };
+
+  return (
+    <>
+      {stage5Error && <div className="rounded-3xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">{errors[stage5Error] ?? stage5Error}</div>}
+      {stage5Saved && <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">{saved[stage5Saved] ?? "Изменения сохранены."}</div>}
+    </>
+  );
+}
+
+function RecommendationActionFields({ recommendation }: { recommendation: PortfolioData["recommendations"][number] }) {
+  return (
+    <>
+      <input name="recommendation_id" type="hidden" value={recommendation.id} />
+      <input name="fingerprint" type="hidden" value={recommendation.fingerprint ?? ""} />
+      <input name="title" type="hidden" value={recommendation.title} />
+      <input name="body" type="hidden" value={recommendation.body ?? ""} />
+      <input name="reason" type="hidden" value={recommendation.reason ?? ""} />
+      <input name="priority" type="hidden" value={recommendation.priority} />
+      <input name="recommendation_type" type="hidden" value={recommendation.recommendation_type} />
+      <input name="confidence" type="hidden" value={recommendation.confidence?.toString() ?? ""} />
+    </>
+  );
+}
+
+function RecommendationsView({ data, filters }: { data: PortfolioData; filters: RecommendationFilterInput }) {
+  const readIds = new Set(data.recommendationReads.map((read) => read.recommendation_id));
+  const canEdit = canEditFamilyData(data.family?.role);
+  const assetById = new Map(data.assets.map((asset) => [asset.id, asset]));
+  const accountById = new Map(data.accounts.map((account) => [account.id, account]));
+  const accountLinksByRecommendationId = data.recommendationLinks
+    .filter((link) => link.entity_table === "accounts")
+    .reduce((groups, link) => {
+      const links = groups.get(link.recommendation_id) ?? [];
+      links.push(link);
+      groups.set(link.recommendation_id, links);
+      return groups;
+    }, new Map<string, typeof data.recommendationLinks>());
+  const recommendations = [...data.recommendations]
+    .filter((recommendation) => !filters.status || recommendation.status === filters.status)
+    .filter((recommendation) => !filters.priority || recommendation.priority === filters.priority)
+    .filter((recommendation) => !filters.assetId || recommendation.linkedAssetId === filters.assetId || recommendation.href?.includes(`asset_id=${filters.assetId}`))
+    .sort((left, right) => {
+    const priorityRank: Record<string, number> = { critical: 4, high: 3, normal: 2, low: 1 };
+    if (filters.sort === "date") return right.updated_at.localeCompare(left.updated_at);
+    if (filters.sort === "priority") return (priorityRank[right.priority] ?? 0) - (priorityRank[left.priority] ?? 0) || right.updated_at.localeCompare(left.updated_at);
+    return (priorityRank[right.priority] ?? 0) - (priorityRank[left.priority] ?? 0) || right.updated_at.localeCompare(left.updated_at);
+  });
+
+  return (
+    <div className="space-y-6" data-testid="recommendations-view">
+      <div className="grid gap-4 md:grid-cols-4">
+        <MetricCard label="Активные" value={recommendations.filter((item) => item.status === "open").length} hint="Открытые сигналы" />
+        <MetricCard label="Rule-based" value={recommendations.filter((item) => item.source === "rule_based").length} hint="Сформированы правилами" />
+        <MetricCard label="Важные" value={recommendations.filter((item) => item.priority === "high" || item.priority === "critical").length} hint="High и critical" />
+        <MetricCard label="Прочитано" value={readIds.size} hint="Факты просмотра из БД" />
+      </div>
+
+      <form className="rounded-3xl border border-border bg-surface p-6" data-testid="recommendation-filters-form">
+        <div className="grid gap-3 md:grid-cols-4">
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Статус</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={filters.status ?? ""} name="recommendation_status">
+              <option value="">Все</option>
+              <option value="open">Открытые</option>
+              <option value="accepted">Принятые</option>
+              <option value="rejected">Отклонённые</option>
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Приоритет</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={filters.priority ?? ""} name="recommendation_priority">
+              <option value="">Все</option>
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="normal">Normal</option>
+              <option value="low">Low</option>
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Актив</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={filters.assetId ?? ""} name="recommendation_asset_id">
+              <option value="">Все</option>
+              {data.assets.map((asset) => (
+                <option key={asset.id} value={asset.id}>{asset.name} · {asset.ticker ?? asset.currency_code ?? "—"}</option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Сортировка</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={filters.sort ?? "priority"} name="recommendation_sort">
+              <option value="priority">Приоритет и дата</option>
+              <option value="date">Дата обновления</option>
+            </select>
+          </label>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" type="submit">
+            Применить
+          </button>
+          <Link className="h-11 rounded-2xl border border-border px-5 py-3 text-sm font-medium" href="/recommendations">
+            Сбросить
+          </Link>
+        </div>
+      </form>
+
+      <section className="space-y-4">
+        {recommendations.map((recommendation) => {
+          const linkedAsset = recommendation.linkedAssetId ? assetById.get(recommendation.linkedAssetId) : null;
+          const linkedAccounts = (accountLinksByRecommendationId.get(recommendation.id) ?? [])
+            .map((link) => accountById.get(link.entity_id))
+            .filter((account): account is NonNullable<typeof account> => Boolean(account));
+          const isRead = readIds.has(recommendation.id);
+
+          return (
+          <article className="rounded-3xl border border-border bg-surface p-6" data-testid="recommendation-card" key={recommendation.id}>
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="flex flex-wrap gap-2">
+                  <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">{recommendationPriorityLabel(recommendation.priority)}</span>
+                  <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">{recommendationStatusLabel(recommendation.status)}</span>
+                  <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">{recommendationTypeLabel(recommendation.recommendation_type)}</span>
+                  {isRead && <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs text-emerald-700">прочитано</span>}
+                  {isGeneratedRecommendation(recommendation.id) && <span className="rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-700">сгенерировано</span>}
+                </div>
+                <h2 className="mt-4 text-xl font-semibold">{recommendation.title}</h2>
+                <p className="mt-2 text-sm text-muted">{recommendation.reason ?? "Причина не указана."}</p>
+              </div>
+              <div className="text-right text-xs text-muted">
+                <p>{formatDateTime(recommendation.updated_at)}</p>
+                <p className="mt-1">{recommendation.source}</p>
+              </div>
+            </div>
+
+            {recommendation.body && <p className="mt-4 text-sm leading-6">{recommendation.body}</p>}
+            {linkedAsset && (
+              <div className="mt-4 rounded-2xl border border-border bg-background px-4 py-3 text-sm">
+                <span className="text-muted">Связанный актив: </span>
+                <Link className="font-medium text-accent" href={`/assets?asset_id=${linkedAsset.id}`}>
+                  {linkedAsset.name}
+                </Link>
+              </div>
+            )}
+            {linkedAccounts.length > 0 && (
+              <div className="mt-3 rounded-2xl border border-border bg-background px-4 py-3 text-sm">
+                <span className="text-muted">Связанные счета: </span>
+                <span className="inline-flex flex-wrap gap-x-3 gap-y-1">
+                  {linkedAccounts.map((account) => (
+                    <Link className="font-medium text-accent" href={`/accounts?account_id=${account.id}`} key={account.id}>
+                      {account.name}
+                    </Link>
+                  ))}
+                </span>
+              </div>
+            )}
+            <RecommendationMetrics metrics={recommendation.metrics} />
+
+            <div className="mt-5 flex flex-wrap gap-2">
+              <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" href={recommendation.href ?? "/dashboard"}>
+                Открыть источник
+              </Link>
+              {canEdit && (
+                <form action={saveRecommendationToWatchlist} className="flex flex-wrap gap-2">
+                  <input name="return_to" type="hidden" value="/recommendations" />
+                  <RecommendationActionFields recommendation={recommendation} />
+                  <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" data-testid="recommendation-read-button" type="submit">
+                    В watchlist
+                  </button>
+                </form>
+              )}
+              {canEdit && !isRead && (
+                <form action={markRecommendationRead}>
+                  <input name="return_to" type="hidden" value="/recommendations" />
+                  <RecommendationActionFields recommendation={recommendation} />
+                  <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" type="submit">
+                    Прочитано
+                  </button>
+                </form>
+              )}
+              {canEdit && recommendation.status === "open" && (
+                <>
+                  <form action={updateRecommendationStatus}>
+                    <input name="return_to" type="hidden" value="/recommendations" />
+                    <input name="status" type="hidden" value="accepted" />
+                    <RecommendationActionFields recommendation={recommendation} />
+                    <button className="rounded-2xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white" data-testid="recommendation-accept-button" type="submit">
+                      Принять
+                    </button>
+                  </form>
+                  <form action={updateRecommendationStatus}>
+                    <input name="return_to" type="hidden" value="/recommendations" />
+                    <input name="status" type="hidden" value="rejected" />
+                    <RecommendationActionFields recommendation={recommendation} />
+                    <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" data-testid="recommendation-reject-button" type="submit">
+                      Отклонить
+                    </button>
+                  </form>
+                </>
+              )}
+              {canEdit && recommendation.status !== "archived" && (
+                <form action={updateRecommendationStatus}>
+                  <input name="return_to" type="hidden" value="/recommendations" />
+                  <input name="status" type="hidden" value="archived" />
+                  <RecommendationActionFields recommendation={recommendation} />
+                  <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium text-muted" type="submit">
+                    Архив
+                  </button>
+                </form>
+              )}
+              <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium text-muted" disabled type="button">
+                What-if на этапе 6
+              </button>
+            </div>
+          </article>
+          );
+        })}
+        {recommendations.length === 0 && <EmptyState text="Рекомендаций пока нет. Они появятся после загрузки портфеля, цен и денежных потоков." />}
+      </section>
+    </div>
+  );
+}
+
+function NewsView({ data, filters }: { data: PortfolioData; filters: NewsFilterInput }) {
+  const assetById = new Map(data.assets.map((asset) => [asset.id, asset]));
+  const watchlistNewsItems = data.watchlistItems.filter((item) => item.news_item_id);
+  const watchlistNewsIds = new Set(watchlistNewsItems.map((item) => item.news_item_id).filter(Boolean));
+  const watchlistItemByNewsId = new Map(watchlistNewsItems.map((item) => [item.news_item_id, item]));
+  const canEdit = canEditFamilyData(data.family?.role);
+  const view = filters.view === "portfolio" || filters.view === "ideas" || filters.view === "saved" ? filters.view : "all";
+  const newsItems = data.newsItems.filter((item) => {
+    if (view === "portfolio") return item.kind === "portfolio_news" || Boolean(item.asset_id);
+    if (view === "ideas") return item.kind === "idea";
+    if (view === "saved") return watchlistNewsIds.has(item.id);
+    return true;
+  });
+
+  return (
+    <div className="space-y-6" data-testid="news-view">
+      <div className="grid gap-4 md:grid-cols-3">
+        <MetricCard label="Новости" value={data.newsItems.filter((item) => item.kind !== "idea").length} hint="По портфелю и рынку" />
+        <MetricCard label="Идеи" value={data.newsItems.filter((item) => item.kind === "idea").length} hint="Внешний поток" />
+        <MetricCard label="В watchlist" value={watchlistNewsIds.size} hint="Сохраненные материалы" />
+      </div>
+
+      <form className="rounded-3xl border border-border bg-surface p-6" data-testid="news-filters-form">
+        <div className="flex flex-wrap gap-2">
+          {[
+            ["all", "Все"],
+            ["portfolio", "По портфелю"],
+            ["ideas", "Идеи"],
+            ["saved", "Сохранённые"],
+          ].map(([value, label]) => (
+            <label className={`cursor-pointer rounded-2xl border px-4 py-2 text-sm font-medium ${view === value ? "border-accent bg-accent text-white" : "border-border bg-background"}`} key={value}>
+              <input className="sr-only" defaultChecked={view === value} name="news_view" type="radio" value={value} />
+              {label}
+            </label>
+          ))}
+          <button className="rounded-2xl border border-border px-4 py-2 text-sm font-medium" type="submit">
+            Применить
+          </button>
+        </div>
+      </form>
+
+      {canEdit && (
+        <section className="rounded-3xl border border-border bg-surface p-6">
+          <h2 className="text-lg font-semibold">Добавить новость или идею</h2>
+          <form action={createNewsItem} className="mt-5 grid gap-3">
+            <input name="return_to" type="hidden" value="/news" />
+            <div className="grid gap-3 md:grid-cols-3">
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Тип</span>
+                <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="kind" required>
+                  <option value="portfolio_news">Новость по портфелю</option>
+                  <option value="market_news">Рыночная новость</option>
+                  <option value="idea">Инвестиционная идея</option>
+                </select>
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Источник</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="source" placeholder="Ручной ввод" required />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Дата публикации</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="published_at" type="datetime-local" />
+              </label>
+            </div>
+            <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="title" placeholder="Заголовок" required />
+            <textarea className="min-h-24 rounded-2xl border border-border bg-background px-4 py-3 text-sm" name="summary" placeholder="Короткое описание" />
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Связанный актив</span>
+                <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="asset_id">
+                  <option value="">Без привязки</option>
+                  {data.assets.map((asset) => (
+                    <option key={asset.id} value={asset.id}>{asset.name} · {asset.ticker ?? asset.currency_code ?? "—"}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">URL источника</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="url" placeholder="https://..." />
+              </label>
+            </div>
+            <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" type="submit">
+              Сохранить материал
+            </button>
+          </form>
+        </section>
+      )}
+
+      <section className="grid gap-4 xl:grid-cols-2">
+        {newsItems.map((newsItem) => (
+          <article className="rounded-3xl border border-border bg-surface p-6" data-testid="news-card" key={newsItem.id}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">{newsKindLabel(newsItem.kind)}</span>
+                {watchlistNewsIds.has(newsItem.id) && <span className="ml-2 rounded-full bg-emerald-50 px-3 py-1 text-xs text-emerald-700">watchlist</span>}
+              </div>
+              <span className="text-xs text-muted">{formatDateTime(newsItem.published_at)}</span>
+            </div>
+            <h2 className="mt-4 text-lg font-semibold">{newsItem.title}</h2>
+            <p className="mt-2 text-sm text-muted">
+              {newsItem.source}
+              {newsItem.asset_id ? ` · ${assetById.get(newsItem.asset_id)?.name ?? "Актив"}` : ""}
+            </p>
+            {newsItem.summary && <p className="mt-4 text-sm leading-6">{newsItem.summary}</p>}
+            <div className="mt-5 flex flex-wrap gap-2">
+              {newsItem.asset_id && (
+                <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" href={`/assets?asset_id=${newsItem.asset_id}`}>
+                  Открыть актив
+                </Link>
+              )}
+              {newsItem.url && (
+                <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" href={newsItem.url}>
+                  Источник
+                </Link>
+              )}
+              {canEdit && !watchlistNewsIds.has(newsItem.id) && (
+                <form action={addNewsToWatchlist}>
+                  <input name="return_to" type="hidden" value="/news" />
+                  <input name="news_item_id" type="hidden" value={newsItem.id} />
+                  <button className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" data-testid="news-watchlist-button" type="submit">
+                    В watchlist
+                  </button>
+                </form>
+              )}
+              {canEdit && watchlistNewsIds.has(newsItem.id) && (
+                <form action={archiveWatchlistItem}>
+                  <input name="return_to" type="hidden" value="/news" />
+                  <input name="watchlist_item_id" type="hidden" value={watchlistItemByNewsId.get(newsItem.id)?.id ?? ""} />
+                  <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium text-muted" type="submit">
+                    Убрать из watchlist
+                  </button>
+                </form>
+              )}
+            </div>
+          </article>
+        ))}
+        {newsItems.length === 0 && <EmptyState text="Материалов по выбранному фильтру пока нет." />}
+      </section>
+    </div>
+  );
+}
+
+function WatchlistView({ data, filters }: { data: PortfolioData; filters: WatchlistFilterInput }) {
+  const assetById = new Map(data.assets.map((asset) => [asset.id, asset]));
+  const newsById = new Map(data.newsItems.map((newsItem) => [newsItem.id, newsItem]));
+  const recommendationById = new Map(data.recommendations.map((recommendation) => [recommendation.id, recommendation]));
+  const canEdit = canEditFamilyData(data.family?.role);
+  const watchlistItems = filterWatchlistItems(data.watchlistItems, filters);
+
+  return (
+    <div className="space-y-6" data-testid="watchlist-view">
+      <div className="grid gap-4 md:grid-cols-4">
+        <MetricCard label="Всего" value={watchlistItems.length} hint="По текущему фильтру" />
+        <MetricCard label="Активы" value={data.watchlistItems.filter((item) => item.item_type === "asset").length} hint="Инструменты" />
+        <MetricCard label="Новости" value={data.watchlistItems.filter((item) => item.item_type === "news" || item.item_type === "idea").length} hint="Материалы и идеи" />
+        <MetricCard label="Рекомендации" value={data.watchlistItems.filter((item) => item.item_type === "recommendation").length} hint="Сигналы" />
+      </div>
+
+      <form className="rounded-3xl border border-border bg-surface p-6" data-testid="watchlist-filters-form">
+        <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto_auto]">
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Тип</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={filters.type ?? ""} name="watchlist_type">
+              <option value="">Все</option>
+              <option value="asset">Активы</option>
+              <option value="news">Новости и идеи</option>
+              <option value="recommendation">Рекомендации</option>
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Статус</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={filters.status ?? ""} name="watchlist_status">
+              <option value="">Все</option>
+              <option value="watching">Наблюдаем</option>
+              <option value="considering">Изучаем</option>
+              <option value="done">Разобрано</option>
+            </select>
+          </label>
+          <button className="self-end rounded-2xl bg-accent px-5 py-3 text-sm font-medium text-white" type="submit">
+            Применить
+          </button>
+          <Link className="self-end rounded-2xl border border-border px-5 py-3 text-sm font-medium" href="/watchlist">
+            Сбросить
+          </Link>
+        </div>
+      </form>
+
+      <section className="overflow-hidden rounded-3xl border border-border bg-surface">
+        {watchlistItems.length === 0 ? (
+          <div className="p-6">
+            <EmptyState text="В watchlist нет элементов по выбранному фильтру." />
+          </div>
+        ) : (
+          <table className="w-full min-w-[760px] text-left text-sm">
+            <thead className="border-b border-border text-muted">
+              <tr>
+                <th className="px-4 py-3 font-medium">Элемент</th>
+                <th className="px-4 py-3 font-medium">Тип</th>
+                <th className="px-4 py-3 font-medium">Статус</th>
+                <th className="px-4 py-3 font-medium">Заметка</th>
+                <th className="px-4 py-3 font-medium">Связь</th>
+                {canEdit && <th className="px-4 py-3 font-medium">Действие</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {watchlistItems.map((item) => {
+                const asset = item.asset_id ? assetById.get(item.asset_id) : null;
+                const newsItem = item.news_item_id ? newsById.get(item.news_item_id) : null;
+                const recommendation = item.recommendation_id ? recommendationById.get(item.recommendation_id) : null;
+                const href = asset ? `/assets?asset_id=${asset.id}` : newsItem ? "/news" : recommendation ? "/recommendations" : "/watchlist";
+
+                return (
+                  <tr className="border-b border-border last:border-0" key={item.id}>
+                    <td className="px-4 py-3 font-medium">{item.title}</td>
+                    <td className="px-4 py-3 text-muted">{item.item_type}</td>
+                    <td className="px-4 py-3 text-muted">
+                      {canEdit ? (
+                        <select className="h-9 rounded-xl border border-border bg-background px-3 text-xs" form={`watchlist-form-${item.id}`} name="status" defaultValue={item.status}>
+                          <option value="watching">Наблюдаем</option>
+                          <option value="considering">Изучаем</option>
+                          <option value="done">Разобрано</option>
+                          <option value="archived">Архив</option>
+                        </select>
+                      ) : (
+                        watchlistStatusLabel(item.status)
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-muted">
+                      {canEdit ? (
+                        <input className="h-9 w-56 rounded-xl border border-border bg-background px-3 text-xs" defaultValue={item.notes ?? ""} form={`watchlist-form-${item.id}`} name="notes" placeholder="Заметка" />
+                      ) : (
+                        item.notes ?? "—"
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <Link className="font-medium text-accent" href={href}>
+                        {asset?.name ?? newsItem?.title ?? recommendation?.title ?? "Открыть"}
+                      </Link>
+                    </td>
+                    {canEdit && (
+                      <td className="px-4 py-3">
+                        <form action={updateWatchlistItem} id={`watchlist-form-${item.id}`}>
+                          <input name="return_to" type="hidden" value="/watchlist" />
+                          <input name="watchlist_item_id" type="hidden" value={item.id} />
+                          <button className="rounded-xl bg-accent px-3 py-2 text-xs font-medium text-white" data-testid="watchlist-save-button" type="submit">
+                            Сохранить
+                          </button>
+                        </form>
+                        <form action={archiveWatchlistItem} className="mt-2">
+                          <input name="return_to" type="hidden" value="/watchlist" />
+                          <input name="watchlist_item_id" type="hidden" value={item.id} />
+                          <button className="rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium text-muted" type="submit">
+                            Архив
+                          </button>
+                        </form>
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function eventPayloadOperationIds(payload: Record<string, unknown>) {
+  const value = payload.operation_ids;
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function eventRelatedOperations(event: PortfolioData["events"][number], operations: Operation[]) {
+  const operationById = new Map(operations.map((operation) => [operation.id, operation]));
+  const explicitOperations = eventPayloadOperationIds(event.payload)
+    .map((operationId) => operationById.get(operationId))
+    .filter((operation): operation is Operation => Boolean(operation));
+
+  if (explicitOperations.length > 0) return explicitOperations;
+  if (!event.asset_id) return [];
+
+  return operations
+    .filter((operation) => operation.asset_id === event.asset_id && operation.trade_date === event.event_date)
+    .slice(0, 5);
+}
+
+function EventsView({ data, filters }: { data: PortfolioData; filters: EventFilterInput }) {
+  const assetById = new Map(data.assets.map((asset) => [asset.id, asset]));
+  const accountById = new Map(data.accounts.map((account) => [account.id, account]));
+  const today = todayIsoDate();
+  const { upcoming, history } = splitPortfolioEvents(filterPortfolioEvents(data.events, filters), today);
+  const canEdit = canEditFamilyData(data.family?.role);
+  const renderEventCard = (event: PortfolioData["events"][number]) => {
+    const linkedOperations = eventRelatedOperations(event, data.operations);
+
+    return (
+      <article className="rounded-2xl border border-border bg-background p-4" data-testid="event-card" key={event.id}>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="font-medium">{event.title}</p>
+            <p className="mt-1 text-sm text-muted">{eventTypeLabel(event.event_type)} · {formatDate(event.event_date)} · {statusLabel(event.status)}</p>
+          </div>
+          {event.amount !== null && event.currency_code && <span className="text-sm font-semibold">{formatMoney(event.amount, event.currency_code)}</span>}
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2 text-sm">
+          {event.asset_id && <Link className="font-medium text-accent" href={`/assets?asset_id=${event.asset_id}`}>{assetById.get(event.asset_id)?.name ?? "Открыть актив"}</Link>}
+          <span className="text-muted">Источник: {event.source}</span>
+        </div>
+
+        {linkedOperations.length > 0 && (
+          <div className="mt-4 overflow-hidden rounded-2xl border border-border bg-surface">
+            <div className="border-b border-border px-4 py-3">
+              <p className="text-sm font-medium">Связанные операции</p>
+            </div>
+            <div className="divide-y divide-border">
+              {linkedOperations.map((operation) => {
+                const account = accountById.get(operation.account_id);
+                return (
+                  <div className="grid gap-1 px-4 py-3 text-sm md:grid-cols-[1fr_auto]" key={operation.id}>
+                    <div>
+                      <p className="font-medium">{operationTypeLabel(operation.operation_type_code)}</p>
+                      <p className="mt-1 text-xs text-muted">{operation.trade_date} · {account?.name ?? "Счёт не найден"}</p>
+                    </div>
+                    <p className="font-medium">{formatSignedMoney(operation.net_amount, operation.currency_code)}</p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+      {canEdit && (
+        <form action={updatePortfolioEvent} className="mt-4 grid gap-3 border-t border-border pt-4">
+          <input name="return_to" type="hidden" value="/events" />
+          <input name="event_id" type="hidden" value={event.id} />
+          <div className="grid gap-3 md:grid-cols-4">
+            <label className="grid gap-2 text-xs">
+              <span className="font-medium">Тип</span>
+              <select className="h-9 rounded-xl border border-border bg-background px-3 text-xs" name="event_type" defaultValue={event.event_type}>
+                <option value="dividend">Дивиденд</option>
+                <option value="coupon">Купон</option>
+                <option value="redemption">Погашение</option>
+              </select>
+            </label>
+            <label className="grid gap-2 text-xs">
+              <span className="font-medium">Статус</span>
+              <select className="h-9 rounded-xl border border-border bg-background px-3 text-xs" name="status" defaultValue={event.status}>
+                <option value="scheduled">Запланировано</option>
+                <option value="done">Выполнено</option>
+                <option value="cancelled">Отменено</option>
+              </select>
+            </label>
+            <label className="grid gap-2 text-xs">
+              <span className="font-medium">Дата</span>
+              <input className="h-9 rounded-xl border border-border bg-background px-3 text-xs" name="event_date" type="date" defaultValue={event.event_date} />
+            </label>
+            <label className="grid gap-2 text-xs">
+              <span className="font-medium">Сумма</span>
+              <input className="h-9 rounded-xl border border-border bg-background px-3 text-xs" name="amount" type="number" step="0.01" defaultValue={event.amount?.toString() ?? ""} />
+            </label>
+          </div>
+          <input className="h-9 rounded-xl border border-border bg-background px-3 text-xs" name="title" defaultValue={event.title} />
+          <div className="grid gap-3 md:grid-cols-[1fr_160px_auto]">
+            <label className="grid gap-2 text-xs">
+              <span className="font-medium">Актив</span>
+              <select className="h-9 rounded-xl border border-border bg-background px-3 text-xs" name="asset_id" defaultValue={event.asset_id ?? ""}>
+                <option value="">Без привязки</option>
+                {data.assets.filter((asset) => asset.asset_type_code !== "cash").map((asset) => (
+                  <option key={asset.id} value={asset.id}>{asset.name} · {asset.ticker ?? asset.currency_code ?? "—"}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-2 text-xs">
+              <span className="font-medium">Валюта</span>
+              <input className="h-9 rounded-xl border border-border bg-background px-3 text-xs" name="currency_code" maxLength={3} defaultValue={event.currency_code ?? data.family?.baseCurrency ?? "RUB"} />
+            </label>
+            <button className="self-end rounded-xl bg-accent px-3 py-2 text-xs font-medium text-white" type="submit">
+              Обновить
+            </button>
+          </div>
+        </form>
+      )}
+      </article>
+    );
+  };
+
+  return (
+    <div className="space-y-6" data-testid="events-view">
+      <div className="grid gap-4 md:grid-cols-4">
+        <MetricCard label="Будущие" value={upcoming.length} hint="Ожидаемые события" />
+        <MetricCard label="История" value={history.length} hint="Прошедшие и выполненные" />
+        <MetricCard label="Купоны" value={data.events.filter((event) => event.event_type === "coupon").length} hint="Все статусы" />
+        <MetricCard label="Дивиденды" value={data.events.filter((event) => event.event_type === "dividend").length} hint="Все статусы" />
+      </div>
+
+      <form className="rounded-3xl border border-border bg-surface p-6" data-testid="events-filters-form">
+        <div className="grid gap-3 md:grid-cols-[1fr_auto_auto]">
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Тип события</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="event_type_filter" defaultValue={filters.type ?? ""}>
+              <option value="">Все</option>
+              <option value="dividend">Дивиденды</option>
+              <option value="coupon">Купоны</option>
+              <option value="redemption">Погашения</option>
+            </select>
+          </label>
+          <button className="self-end rounded-2xl bg-accent px-5 py-3 text-sm font-medium text-white" type="submit">
+            Применить
+          </button>
+          <Link className="self-end rounded-2xl border border-border px-5 py-3 text-sm font-medium" href="/events">
+            Сбросить
+          </Link>
+        </div>
+      </form>
+
+      {canEdit && (
+        <section className="rounded-3xl border border-border bg-surface p-6">
+          <h2 className="text-lg font-semibold">Добавить событие</h2>
+          <form action={createPortfolioEvent} className="mt-5 grid gap-3">
+            <input name="return_to" type="hidden" value="/events" />
+            <div className="grid gap-3 md:grid-cols-4">
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Тип</span>
+                <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="event_type" required>
+                  <option value="dividend">Дивиденд</option>
+                  <option value="coupon">Купон</option>
+                  <option value="redemption">Погашение</option>
+                </select>
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Дата</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="event_date" required type="date" />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Сумма</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="amount" placeholder="Опционально" step="0.01" type="number" />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Валюта</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" defaultValue={data.family?.baseCurrency ?? "RUB"} maxLength={3} name="currency_code" />
+              </label>
+            </div>
+            <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="title" placeholder="Название события" required />
+            <label className="grid gap-2 text-sm">
+              <span className="font-medium">Актив</span>
+              <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="asset_id">
+                <option value="">Без привязки</option>
+                {data.assets.filter((asset) => asset.asset_type_code !== "cash").map((asset) => (
+                  <option key={asset.id} value={asset.id}>{asset.name} · {asset.ticker ?? asset.currency_code ?? "—"}</option>
+                ))}
+              </select>
+            </label>
+            <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" type="submit">
+              Сохранить событие
+            </button>
+          </form>
+        </section>
+      )}
+
+      <section className="grid gap-6 xl:grid-cols-2">
+        <div className="rounded-3xl border border-border bg-surface p-6">
+          <h2 className="text-lg font-semibold">Будущие события</h2>
+          <div className="mt-5 space-y-3">
+            {upcoming.map(renderEventCard)}
+            {upcoming.length === 0 && <EmptyState text="Будущих событий пока нет. Их можно будет загрузить из календаря или добавить вручную." />}
+          </div>
+        </div>
+
+        <div className="rounded-3xl border border-border bg-surface p-6">
+          <h2 className="text-lg font-semibold">История событий</h2>
+          <div className="mt-5 space-y-3">
+            {history.slice(0, 12).map(renderEventCard)}
+            {history.length === 0 && <EmptyState text="Исторических событий пока нет." />}
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -1965,6 +3364,10 @@ function SectionContent({
   priced,
   priceError,
   positionFilters,
+  recommendationFilters,
+  newsFilters,
+  watchlistFilters,
+  eventFilters,
   operationError,
   operationCancelled,
   operationSaved,
@@ -1977,6 +3380,8 @@ function SectionContent({
   selectedAccountId,
   settingsError,
   settingsSaved,
+  stage5Error,
+  stage5Saved,
   uploaded,
 }: {
   applied?: string;
@@ -1989,6 +3394,10 @@ function SectionContent({
   priced?: string;
   priceError?: string;
   positionFilters: PositionFilterInput;
+  recommendationFilters: RecommendationFilterInput;
+  newsFilters: NewsFilterInput;
+  watchlistFilters: WatchlistFilterInput;
+  eventFilters: EventFilterInput;
   operationError?: string;
   operationCancelled?: string;
   operationSaved?: string;
@@ -2001,6 +3410,8 @@ function SectionContent({
   selectedAccountId?: string;
   settingsError?: string;
   settingsSaved?: string;
+  stage5Error?: string;
+  stage5Saved?: string;
   uploaded?: string;
 }) {
   if (!data.family) return <EmptyState text="Для пользователя пока не назначена семья. Нужно добавить запись в family_members." />;
@@ -2033,7 +3444,39 @@ function SectionContent({
       </div>
     );
   }
-  if (section === "settings") return <SettingsView data={data} settingsError={settingsError} settingsSaved={settingsSaved} />;
+  if (section === "settings") return <SettingsView data={data} settingsError={settingsError} settingsSaved={settingsSaved} stage5Error={stage5Error} stage5Saved={stage5Saved} />;
+  if (section === "recommendations") {
+    return (
+      <div className="space-y-6">
+        <Stage5Notice stage5Error={stage5Error} stage5Saved={stage5Saved} />
+        <RecommendationsView data={data} filters={recommendationFilters} />
+      </div>
+    );
+  }
+  if (section === "news") {
+    return (
+      <div className="space-y-6">
+        <Stage5Notice stage5Error={stage5Error} stage5Saved={stage5Saved} />
+        <NewsView data={data} filters={newsFilters} />
+      </div>
+    );
+  }
+  if (section === "watchlist") {
+    return (
+      <div className="space-y-6">
+        <Stage5Notice stage5Error={stage5Error} stage5Saved={stage5Saved} />
+        <WatchlistView data={data} filters={watchlistFilters} />
+      </div>
+    );
+  }
+  if (section === "events") {
+    return (
+      <div className="space-y-6">
+        <Stage5Notice stage5Error={stage5Error} stage5Saved={stage5Saved} />
+        <EventsView data={data} filters={eventFilters} />
+      </div>
+    );
+  }
   return <PlaceholderView section={section} />;
 }
 
@@ -2064,6 +3507,22 @@ export default async function SectionPage({
     query: queryValue(query.position_query),
     sortBy: queryValue(query.position_sort),
   };
+  const recommendationFilters: RecommendationFilterInput = {
+    status: queryValue(query.recommendation_status),
+    priority: queryValue(query.recommendation_priority),
+    assetId: queryValue(query.recommendation_asset_id),
+    sort: queryValue(query.recommendation_sort),
+  };
+  const newsFilters: NewsFilterInput = {
+    view: queryValue(query.news_view),
+  };
+  const watchlistFilters: WatchlistFilterInput = {
+    type: queryValue(query.watchlist_type),
+    status: queryValue(query.watchlist_status),
+  };
+  const eventFilters: EventFilterInput = {
+    type: queryValue(query.event_type_filter),
+  };
 
   return (
     <section>
@@ -2084,6 +3543,10 @@ export default async function SectionPage({
           operationSaved={queryValue(query.operation_saved)}
           priced={queryValue(query.priced)}
           positionFilters={positionFilters}
+          recommendationFilters={recommendationFilters}
+          newsFilters={newsFilters}
+          watchlistFilters={watchlistFilters}
+          eventFilters={eventFilters}
           priceError={queryValue(query.price_error)}
           parsed={queryValue(query.parsed)}
           parseError={queryValue(query.parse_error)}
@@ -2094,13 +3557,15 @@ export default async function SectionPage({
           selectedAssetId={queryValue(query.asset_id)}
           settingsError={queryValue(query.settings_error)}
           settingsSaved={queryValue(query.settings_saved)}
+          stage5Error={queryValue(query.stage5_error)}
+          stage5Saved={queryValue(query.stage5_saved)}
           uploaded={queryValue(query.uploaded)}
         />
       </div>
       {section === "dashboard" && (
         <div className="mt-8">
           <h2 className="mb-3 text-lg font-semibold">Последние операции</h2>
-          <OperationsView accounts={data.accounts} assets={data.assets} operations={data.operations} />
+          <OperationsView accounts={data.accounts} assets={data.assets} operations={data.operations.slice(0, 5)} />
         </div>
       )}
     </section>

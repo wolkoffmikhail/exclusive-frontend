@@ -24,6 +24,27 @@ It checks:
   - cash-flow period switch;
   - cash-flow table;
   - XIRR detail and cash-flow rows;
+- Stage 5 dashboard signals;
+- Recommendations:
+  - list and filters;
+  - recommendation card;
+  - mark as read action when available;
+  - status update action when available;
+- News and ideas:
+  - list and filters;
+  - news card;
+  - save to watchlist action when available;
+- Watchlist:
+  - list and filters;
+  - notes/status update when an editable item is available;
+- Events:
+  - list and filters;
+  - event cards;
+- Limits:
+  - admin-only limits settings;
+  - default limit creation when no active limits exist;
+  - limit check action;
+- viewer read-only access for stage 5 sections;
 - Assets and positions;
 - duplicate upload protection for the same report;
 - Audit block in Settings.
@@ -49,6 +70,8 @@ On Windows the smoke runner auto-detects installed Edge or Chrome when `PLAYWRIG
 Provide real demo credentials:
 
 ```bash
+DEMO_ADMIN_EMAIL=admin@example.com
+DEMO_ADMIN_PASSWORD=...
 DEMO_VIEWER_EMAIL=viewer@example.com
 DEMO_VIEWER_PASSWORD=...
 DEMO_EDITOR_EMAIL=editor@example.com
@@ -71,7 +94,15 @@ npm run demo:seed-users
 
 The seed command creates or updates auth users, links them to one demo family as `admin`, `editor`, and `viewer`, and creates an active demo portfolio/account for imports.
 
-For a full fresh-upload run, the selected demo account must not already have the same broker report SHA-256 in its import journal. If the fixture was already uploaded, the smoke runner stops on the expected duplicate protection and asks for demo import data to be reset before rerunning the full path.
+For stage 5 news/watchlist coverage, seed demo news before running browser smoke when the environment has no news items yet:
+
+```bash
+SUPABASE_INTERNAL_URL=http://192.168.0.22:8012 \
+SUPABASE_SERVICE_ROLE_KEY=... \
+npm run demo:seed-news
+```
+
+For a full fresh-upload run, the selected demo account must not already have the same broker report SHA-256 in its import journal. If the fixture was already uploaded, the smoke runner verifies duplicate protection and continues with dashboard, assets and stage 5 checks against the existing demo data.
 
 Optionally override the target and broker report fixture:
 

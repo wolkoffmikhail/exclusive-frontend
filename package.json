@@ -13,6 +13,9 @@
     "smoke": "node scripts/smoke.mjs",
     "smoke:prod": "node scripts/smoke.mjs http://192.168.0.22:31010",
     "smoke:browser-demo": "node scripts/browser-demo-smoke.mjs",
+    "smoke:telegram": "node scripts/telegram-smoke.mjs",
+    "smoke:max": "node scripts/max-smoke.mjs",
+    "demo:seed-news": "node scripts/seed-demo-news.mjs",
     "demo:seed-users": "node ops/seed-demo-users.mjs"
   },
   "engines": {
