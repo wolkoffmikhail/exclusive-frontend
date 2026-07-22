@@ -60,6 +60,12 @@ function queryParam(page, name) {
   return new URL(page.url()).searchParams.get(name);
 }
 
+function daysFromNowIsoDate(days) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 async function assertVisible(locator, message) {
   assert((await locator.count()) > 0, message);
   await locator.first().waitFor({ state: "visible", timeout: 15_000 });
@@ -72,6 +78,15 @@ async function assertNoVisible(locator, message) {
 async function isVisible(locator) {
   if ((await locator.count()) === 0) return false;
   return locator.first().isVisible();
+}
+
+async function visibleCount(locator) {
+  const count = await locator.count();
+  let visible = 0;
+  for (let index = 0; index < count; index += 1) {
+    if (await locator.nth(index).isVisible()) visible += 1;
+  }
+  return visible;
 }
 
 async function waitForLatestImportStatus(page, statuses) {
@@ -93,6 +108,20 @@ async function submitActionForm(page, trigger, urlPredicate, timeout = 30_000) {
     trigger.first().evaluate((element) => element.closest("form")?.requestSubmit()),
   ]);
   await page.waitForLoadState("networkidle");
+}
+
+async function submitStage5Action(page, trigger, expectedSavedValues = [], timeout = 30_000) {
+  await submitActionForm(
+    page,
+    trigger,
+    (url) => {
+      const saved = url.searchParams.get("stage5_saved");
+      return Boolean((saved && (expectedSavedValues.length === 0 || expectedSavedValues.includes(saved))) || url.searchParams.get("stage5_error"));
+    },
+    timeout,
+  );
+  const error = queryParam(page, "stage5_error");
+  assert(!error, `stage 5 action should not fail: ${error}`);
 }
 
 async function selectFirstAccount(page) {
@@ -184,12 +213,66 @@ async function assertAdminEditableAccess(page) {
   await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
   assert((await page.locator("text=Audit").count()) > 0, "admin should open settings and see audit block");
   await assertVisible(page.getByTestId("limits-settings"), "admin should see limits settings");
-  if ((await page.getByTestId("limit-card").count()) === 0 && (await isVisible(page.getByTestId("create-default-limits-button")))) {
-    await submitActionForm(page, page.getByTestId("create-default-limits-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
-  }
-  await assertVisible(page.getByTestId("check-limits-button"), "admin should see limit check action");
-  await submitActionForm(page, page.getByTestId("check-limits-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
+  await assertLimitAlertLifecycle(page);
   console.log("ok admin editable access");
+}
+
+async function ensureDefaultLimits(page) {
+  await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("limits-settings"), "admin should see limits settings");
+  await assertVisible(page.getByTestId("create-default-limits-button"), "admin should see default limit action");
+  await submitStage5Action(page, page.getByTestId("create-default-limits-button"), ["limits-template", "limits-template-empty"]);
+  await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("limit-card"), "default limits should be present");
+}
+
+async function configureLimit(page, limitId, { direction, severity, threshold, type }) {
+  await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
+  const limitCard = page.locator(`[data-limit-id="${limitId}"]`);
+  await assertVisible(limitCard, "target limit should remain available");
+
+  await limitCard.locator('select[name="limit_type"]').selectOption(type);
+  await limitCard.locator('select[name="direction"]').selectOption(direction);
+  await limitCard.locator('select[name="severity"]').selectOption(severity);
+  await limitCard.locator('input[name="scope_key"]').fill("");
+  await limitCard.locator('input[name="threshold_value"]').fill(String(threshold));
+  await submitStage5Action(page, limitCard.locator("form").nth(1).locator('button[type="submit"]'), ["limit-updated"]);
+}
+
+async function checkLimitsFromSettings(page) {
+  await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("check-limits-button"), "admin should see limit check action");
+  await submitStage5Action(page, page.getByTestId("check-limits-button"), ["limits-checked", "limits-checked-partial", "limits-checked-with-alerts"]);
+  await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
+  return visibleCount(page.getByTestId("limit-alert-card"));
+}
+
+async function assertLimitAlertLifecycle(page) {
+  await ensureDefaultLimits(page);
+
+  const limitId = await page.getByTestId("limit-card").first().getAttribute("data-limit-id");
+  assert(limitId, "limit card should expose a stable id");
+
+  try {
+    await configureLimit(page, limitId, { type: "cash_max_share", direction: "max", severity: "warning", threshold: 1 });
+    const calmAlertCount = await checkLimitsFromSettings(page);
+
+    await configureLimit(page, limitId, { type: "cash_min_share", direction: "min", severity: "warning", threshold: 0.9999 });
+    let firstViolationAlertCount = await checkLimitsFromSettings(page);
+
+    if (firstViolationAlertCount <= calmAlertCount) {
+      await configureLimit(page, limitId, { type: "cash_max_share", direction: "max", severity: "warning", threshold: 0.0001 });
+      firstViolationAlertCount = await checkLimitsFromSettings(page);
+    }
+
+    assert(firstViolationAlertCount > calmAlertCount, "violated limit should create an active alert");
+    const secondViolationAlertCount = await checkLimitsFromSettings(page);
+    assert(secondViolationAlertCount === firstViolationAlertCount, "repeated limit checks should not duplicate active alerts");
+    console.log("ok stage 5 limit alert lifecycle");
+  } finally {
+    await configureLimit(page, limitId, { type: "cash_max_share", direction: "max", severity: "warning", threshold: 1 });
+    await checkLimitsFromSettings(page);
+  }
 }
 
 async function assertDashboardAnalytics(page) {
@@ -213,6 +296,14 @@ async function assertDashboardAnalytics(page) {
   await page.waitForURL((url) => url.pathname === "/dashboard" && url.searchParams.get("dashboard_period") === "YTD", { timeout: 10_000 });
   await page.waitForLoadState("networkidle");
   await assertVisible(page.getByTestId("dashboard-cash-flows"), "dashboard should keep cash-flow section after period switch");
+
+  await assertVisible(page.getByTestId("dashboard-recommendation-link"), "dashboard should show recommendation links");
+  await Promise.all([
+    page.waitForURL((url) => url.pathname === "/recommendations", { timeout: 10_000 }),
+    page.getByTestId("dashboard-recommendation-link").first().click(),
+  ]);
+  await page.waitForLoadState("networkidle");
+  await assertVisible(page.getByTestId("recommendation-card"), "dashboard recommendation should open recommendations list");
   console.log("ok dashboard analytics");
 }
 
@@ -221,13 +312,21 @@ async function assertStage5Signals(page) {
   await assertVisible(page.getByTestId("recommendations-view"), "editor should open recommendations");
   await assertVisible(page.getByTestId("recommendation-filters-form"), "recommendations should show filters");
   await assertVisible(page.getByTestId("recommendation-card"), "recommendations should show a recommendation card");
+  const recommendationCard = page.getByTestId("recommendation-card").first();
+  await assertVisible(recommendationCard.getByTestId("recommendation-reason"), "recommendation should show a reason");
+  await assertVisible(recommendationCard.getByTestId("recommendation-metrics"), "recommendation should show metrics");
+  await assertVisible(recommendationCard.getByTestId("recommendation-source-link"), "recommendation should include a source link");
+
+  if (await isVisible(page.getByTestId("recommendation-mark-read-button"))) {
+    await submitStage5Action(page, page.getByTestId("recommendation-mark-read-button"), ["recommendation-read"]);
+  }
 
   if (await isVisible(page.getByTestId("recommendation-read-button"))) {
-    await submitActionForm(page, page.getByTestId("recommendation-read-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
+    await submitStage5Action(page, page.getByTestId("recommendation-read-button"), ["watchlist-recommendation"]);
   }
 
   if (await isVisible(page.getByTestId("recommendation-accept-button"))) {
-    await submitActionForm(page, page.getByTestId("recommendation-accept-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
+    await submitStage5Action(page, page.getByTestId("recommendation-accept-button"), ["recommendation-status"]);
   }
   console.log("ok stage 5 recommendations");
 
@@ -237,7 +336,7 @@ async function assertStage5Signals(page) {
   await assertVisible(page.getByTestId("news-card"), "news should show at least one news item or idea");
 
   if (await isVisible(page.getByTestId("news-watchlist-button"))) {
-    await submitActionForm(page, page.getByTestId("news-watchlist-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
+    await submitStage5Action(page, page.getByTestId("news-watchlist-button"), ["watchlist-news"]);
   }
   console.log("ok stage 5 news");
 
@@ -250,15 +349,45 @@ async function assertStage5Signals(page) {
     if (await noteInput.isVisible()) {
       await noteInput.fill(`smoke ${new Date().toISOString()}`);
     }
-    await submitActionForm(page, page.getByTestId("watchlist-save-button"), (url) => url.href.includes("stage5_saved=") || url.href.includes("stage5_error="));
+    await submitStage5Action(page, page.getByTestId("watchlist-save-button"), ["watchlist"]);
   }
   console.log("ok stage 5 watchlist");
 
   await page.goto(`${baseUrl}/events`, { waitUntil: "networkidle" });
   await assertVisible(page.getByTestId("events-view"), "editor should open events");
   await assertVisible(page.getByTestId("events-filters-form"), "events should show filters");
+  await assertVisible(page.getByTestId("events-upcoming-section"), "events should show upcoming section");
+  await assertVisible(page.getByTestId("events-history-section"), "events should show history section");
   await assertVisible(page.getByTestId("event-card"), "events should show event cards");
+  await ensureLinkedEvent(page);
+  await assertVisible(page.getByTestId("event-asset-link"), "events should link related assets");
+  await Promise.all([
+    page.waitForURL((url) => url.pathname === "/assets" && url.searchParams.has("asset_id"), { timeout: 10_000 }),
+    page.getByTestId("event-asset-link").first().click(),
+  ]);
+  await page.waitForLoadState("networkidle");
+  await assertVisible(page.getByTestId("assets-view"), "event asset link should open assets");
   console.log("ok stage 5 events");
+}
+
+async function ensureLinkedEvent(page) {
+  if (await isVisible(page.getByTestId("event-asset-link"))) return;
+
+  const createEventForm = page.getByTestId("create-event-form");
+  await assertVisible(createEventForm, "editor should be able to create an event when no linked event exists");
+  const assetSelect = createEventForm.locator('select[name="asset_id"]');
+  const assetOptions = await assetSelect.locator("option").evaluateAll((options) =>
+    options.map((option) => option.value).filter(Boolean),
+  );
+  assert(assetOptions.length > 0, "event smoke needs at least one non-cash asset");
+
+  await createEventForm.locator('select[name="event_type"]').selectOption("dividend");
+  await createEventForm.locator('input[name="event_date"]').fill(daysFromNowIsoDate(10));
+  await createEventForm.locator('input[name="amount"]').fill("1");
+  await createEventForm.locator('input[name="title"]').fill(`Smoke linked event ${new Date().toISOString()}`);
+  await assetSelect.selectOption(assetOptions[0]);
+  await submitStage5Action(page, page.getByTestId("create-event-button"), ["event"]);
+  await page.goto(`${baseUrl}/events`, { waitUntil: "networkidle" });
 }
 
 async function assertEditorImportFlow(page) {

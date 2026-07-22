@@ -460,7 +460,7 @@ function DashboardView({ data, dashboardPeriod }: { data: PortfolioData; dashboa
             </div>
             <div className="mt-5 space-y-3">
               {topRecommendations.map((recommendation) => (
-                <Link className="block rounded-2xl border border-border bg-background p-4" href="/recommendations" key={recommendation.id}>
+                <Link className="block rounded-2xl border border-border bg-background p-4" data-testid="dashboard-recommendation-link" href="/recommendations" key={recommendation.id}>
                   <span className="text-xs font-medium uppercase text-muted">{recommendationPriorityLabel(recommendation.priority)}</span>
                   <span className="mt-2 block font-medium">{recommendation.title}</span>
                   <span className="mt-1 block text-sm text-muted">{recommendation.reason ?? recommendationTypeLabel(recommendation.recommendation_type)}</span>
@@ -2175,7 +2175,7 @@ function LimitsSettingsView({ data }: { data: PortfolioData }) {
           <h3 className="text-sm font-semibold">Активные лимиты</h3>
           <div className="mt-3 space-y-3">
             {data.limits.map((limit) => (
-              <div className="rounded-2xl border border-border bg-background p-4" data-testid="limit-card" key={limit.id}>
+              <div className="rounded-2xl border border-border bg-background p-4" data-limit-id={limit.id} data-testid="limit-card" key={limit.id}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <p className="font-medium">{limitTypeLabel(limit.limit_type)}</p>
@@ -2262,7 +2262,7 @@ function LimitsSettingsView({ data }: { data: PortfolioData }) {
       </div>
 
       {canManage && (
-        <form action={createLimit} className="mt-6 grid gap-3 rounded-2xl border border-border bg-background p-4">
+        <form action={createLimit} className="mt-6 grid gap-3 rounded-2xl border border-border bg-background p-4" data-testid="create-limit-form">
           <input name="return_to" type="hidden" value="/settings" />
           <div className="grid gap-3 md:grid-cols-3">
             <label className="grid gap-2 text-sm">
@@ -2298,7 +2298,7 @@ function LimitsSettingsView({ data }: { data: PortfolioData }) {
               <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="threshold_value" placeholder="0.35 или 35" required step="0.0001" type="number" />
             </label>
           </div>
-          <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" type="submit">
+          <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" data-testid="create-limit-button" type="submit">
             Создать лимит
           </button>
         </form>
@@ -2561,7 +2561,7 @@ function RecommendationMetrics({ metrics }: { metrics: Record<string, unknown> }
   if (entries.length === 0) return null;
 
   return (
-    <div className="mt-4 grid gap-2 md:grid-cols-3">
+    <div className="mt-4 grid gap-2 md:grid-cols-3" data-testid="recommendation-metrics">
       {entries.slice(0, 6).map(([key, value]) => (
         <div className="rounded-2xl border border-border bg-surface px-3 py-2" key={key}>
           <p className="text-[11px] uppercase text-muted">{key.replaceAll("_", " ")}</p>
@@ -2765,7 +2765,7 @@ function RecommendationsView({ data, filters }: { data: PortfolioData; filters: 
                   {isGeneratedRecommendation(recommendation.id) && <span className="rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-700">сгенерировано</span>}
                 </div>
                 <h2 className="mt-4 text-xl font-semibold">{recommendation.title}</h2>
-                <p className="mt-2 text-sm text-muted">{recommendation.reason ?? "Причина не указана."}</p>
+                <p className="mt-2 text-sm text-muted" data-testid="recommendation-reason">{recommendation.reason ?? "Причина не указана."}</p>
               </div>
               <div className="text-right text-xs text-muted">
                 <p>{formatDateTime(recommendation.updated_at)}</p>
@@ -2797,7 +2797,7 @@ function RecommendationsView({ data, filters }: { data: PortfolioData; filters: 
             <RecommendationMetrics metrics={recommendation.metrics} />
 
             <div className="mt-5 flex flex-wrap gap-2">
-              <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" href={recommendation.href ?? "/dashboard"}>
+              <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" data-testid="recommendation-source-link" href={recommendation.href ?? "/dashboard"}>
                 Открыть источник
               </Link>
               {canEdit && (
@@ -2813,7 +2813,7 @@ function RecommendationsView({ data, filters }: { data: PortfolioData; filters: 
                 <form action={markRecommendationRead}>
                   <input name="return_to" type="hidden" value="/recommendations" />
                   <RecommendationActionFields recommendation={recommendation} />
-                  <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" type="submit">
+                  <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" data-testid="recommendation-mark-read-button" type="submit">
                     Прочитано
                   </button>
                 </form>
@@ -3168,7 +3168,7 @@ function EventsView({ data, filters }: { data: PortfolioData; filters: EventFilt
           {event.amount !== null && event.currency_code && <span className="text-sm font-semibold">{formatMoney(event.amount, event.currency_code)}</span>}
         </div>
         <div className="mt-3 flex flex-wrap gap-2 text-sm">
-          {event.asset_id && <Link className="font-medium text-accent" href={`/assets?asset_id=${event.asset_id}`}>{assetById.get(event.asset_id)?.name ?? "Открыть актив"}</Link>}
+          {event.asset_id && <Link className="font-medium text-accent" data-testid="event-asset-link" href={`/assets?asset_id=${event.asset_id}`}>{assetById.get(event.asset_id)?.name ?? "Открыть актив"}</Link>}
           <span className="text-muted">Источник: {event.source}</span>
         </div>
 
@@ -3281,7 +3281,7 @@ function EventsView({ data, filters }: { data: PortfolioData; filters: EventFilt
       {canEdit && (
         <section className="rounded-3xl border border-border bg-surface p-6">
           <h2 className="text-lg font-semibold">Добавить событие</h2>
-          <form action={createPortfolioEvent} className="mt-5 grid gap-3">
+          <form action={createPortfolioEvent} className="mt-5 grid gap-3" data-testid="create-event-form">
             <input name="return_to" type="hidden" value="/events" />
             <div className="grid gap-3 md:grid-cols-4">
               <label className="grid gap-2 text-sm">
@@ -3315,7 +3315,7 @@ function EventsView({ data, filters }: { data: PortfolioData; filters: EventFilt
                 ))}
               </select>
             </label>
-            <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" type="submit">
+            <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" data-testid="create-event-button" type="submit">
               Сохранить событие
             </button>
           </form>
@@ -3323,7 +3323,7 @@ function EventsView({ data, filters }: { data: PortfolioData; filters: EventFilt
       )}
 
       <section className="grid gap-6 xl:grid-cols-2">
-        <div className="rounded-3xl border border-border bg-surface p-6">
+        <div className="rounded-3xl border border-border bg-surface p-6" data-testid="events-upcoming-section">
           <h2 className="text-lg font-semibold">Будущие события</h2>
           <div className="mt-5 space-y-3">
             {upcoming.map(renderEventCard)}
@@ -3331,7 +3331,7 @@ function EventsView({ data, filters }: { data: PortfolioData; filters: EventFilt
           </div>
         </div>
 
-        <div className="rounded-3xl border border-border bg-surface p-6">
+        <div className="rounded-3xl border border-border bg-surface p-6" data-testid="events-history-section">
           <h2 className="text-lg font-semibold">История событий</h2>
           <div className="mt-5 space-y-3">
             {history.slice(0, 12).map(renderEventCard)}
