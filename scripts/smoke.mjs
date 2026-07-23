@@ -7,6 +7,7 @@ const protectedRoutes = [
   "/assets",
   "/import",
   "/recommendations",
+  "/what-if",
   "/news",
   "/watchlist",
   "/events",
