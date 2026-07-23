@@ -8,6 +8,7 @@ const protectedPrefixes = [
   "/assets",
   "/import",
   "/recommendations",
+  "/what-if",
   "/news",
   "/watchlist",
   "/events",
