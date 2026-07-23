@@ -291,6 +291,7 @@ export type PortfolioData = {
   assets: Asset[];
   operations: Operation[];
   operationCount: number;
+  positionSnapshots: PositionSnapshot[];
   positions: Position[];
   cashBalances: CalculatedCashBalance[];
   analytics: PortfolioAnalytics;
@@ -358,6 +359,7 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       assets: [],
       operations: [],
       operationCount: 0,
+      positionSnapshots: [],
       positions: [],
       cashBalances: [],
       analytics: buildPortfolioAnalytics({
@@ -563,6 +565,7 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
     assets: assetRows,
     operations: operationRows,
     operationCount: operationRows.length,
+    positionSnapshots: snapshotRows,
     positions,
     cashBalances,
     analytics,

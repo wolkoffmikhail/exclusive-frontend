@@ -11,6 +11,7 @@ const navigation = [
   ["assets", "Активы"],
   ["import", "Импорт"],
   ["recommendations", "Рекомендации"],
+  ["what-if", "What-if"],
   ["news", "Новости"],
   ["watchlist", "Watchlist"],
   ["events", "События"],

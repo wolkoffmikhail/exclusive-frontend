@@ -5,6 +5,7 @@ import { getActiveFamily, getPortfolioData, type Account, type ImportJob, type O
 import { filterPortfolioEvents, splitPortfolioEvents, type EventFilterInput } from "@/lib/portfolio/events";
 import { filterAndSortPositions, groupPositionsByAssetType, type PositionFilterInput } from "@/lib/portfolio/position-filters";
 import { canEditFamilyData, canManageFamily } from "@/lib/portfolio/permissions";
+import { runWhatIfScenario, type ScenarioMetricDelta, type WhatIfScenarioResult } from "@/lib/portfolio/scenarios";
 import { filterWatchlistItems, type WatchlistFilterInput } from "@/lib/portfolio/watchlist";
 import { createClient } from "@/lib/supabase/server";
 import { applyBrokerImport, deleteFailedImport, parseBrokerImport, restoreImportRow, skipImportRow, uploadBrokerReport } from "./import-actions";
@@ -19,6 +20,7 @@ const sections: Record<string, { title: string; description: string }> = {
   assets: { title: "Активы", description: "Справочник активов, который будет использоваться в операциях и отчётах." },
   import: { title: "Импорт", description: "Загрузка брокерских отчётов и журнал обработки файлов." },
   recommendations: { title: "Рекомендации", description: "Сигналы и предложения по управлению портфелем." },
+  "what-if": { title: "What-if", description: "Проверка покупки или продажи одного актива без изменения учётных данных." },
   news: { title: "Новости", description: "Новости, связанные с активами портфеля." },
   watchlist: { title: "Watchlist", description: "Активы и идеи для наблюдения." },
   events: { title: "События", description: "Дивиденды, купоны, погашения и другие события." },
@@ -36,6 +38,18 @@ type RecommendationFilterInput = {
 
 type NewsFilterInput = {
   view?: string;
+};
+
+type WhatIfFormInput = {
+  scenarioType?: string;
+  accountId?: string;
+  assetId?: string;
+  tradeDate?: string;
+  quantity?: string;
+  price?: string;
+  currencyCode?: string;
+  commission?: string;
+  sourceRecommendationId?: string;
 };
 
 export function generateStaticParams() {
@@ -115,6 +129,12 @@ function queryValue(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function parseQueryNumber(value: string | undefined) {
+  if (!value) return null;
+  const parsed = Number(value.replace(/\s/g, "").replace(",", "."));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function formatNumber(value: number | string | null | undefined, digits = 2) {
   const number = typeof value === "number" ? value : Number(value ?? 0);
   if (!Number.isFinite(number)) return "—";
@@ -141,6 +161,47 @@ function formatPercent(value: number | null | undefined) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "—";
   const sign = value > 0 ? "+" : "";
   return `${sign}${formatNumber(value * 100, 2)}%`;
+}
+
+function formatScenarioMetricValue(metric: ScenarioMetricDelta, value: number | null) {
+  if (value === null) return "—";
+  if (metric.format === "money") return formatMoney(value, metric.currencyCode ?? "RUB");
+  if (metric.format === "percent") return formatPercent(value);
+  return formatNumber(value, 6);
+}
+
+function formatScenarioMetricDelta(metric: ScenarioMetricDelta) {
+  if (metric.delta === null) return "—";
+  if (metric.format === "money") return formatSignedMoney(metric.delta, metric.currencyCode ?? "RUB");
+  if (metric.format === "percent") return formatPercent(metric.delta);
+  const sign = metric.delta > 0 ? "+" : "";
+  return `${sign}${formatNumber(metric.delta, 6)}`;
+}
+
+function whatIfInputHasSubmission(input: WhatIfFormInput) {
+  return Boolean(input.quantity || input.price || input.assetId || input.accountId || input.sourceRecommendationId);
+}
+
+function whatIfExportHref(input: WhatIfFormInput, format: "excel" | "pdf-html") {
+  const params = new URLSearchParams();
+  params.set("format", format);
+  params.set("include_scenario", "1");
+  params.set("period", "1M");
+  if (input.scenarioType) params.set("scenario_type", input.scenarioType);
+  if (input.accountId) params.set("account_id", input.accountId);
+  if (input.assetId) params.set("asset_id", input.assetId);
+  if (input.tradeDate) params.set("trade_date", input.tradeDate);
+  if (input.quantity) params.set("quantity", input.quantity);
+  if (input.price) params.set("price", input.price);
+  if (input.currencyCode) params.set("currency_code", input.currencyCode);
+  if (input.commission) params.set("commission", input.commission);
+  if (input.sourceRecommendationId) params.set("source_recommendation_id", input.sourceRecommendationId);
+  return `/api/portfolio/export?${params.toString()}`;
+}
+
+function deltaTone(value: number | null) {
+  if (value === null || value === 0) return "text-muted";
+  return value > 0 ? "text-emerald-700" : "text-red-700";
 }
 
 function periodLabel(period: string) {
@@ -236,6 +297,32 @@ function recommendationMetricLabel(recommendation: PortfolioData["recommendation
   if (typeof metrics.xirr_status === "string") return `XIRR: ${xirrStatusLabel(metrics.xirr_status)}`;
 
   return null;
+}
+
+function recommendationAssetId(recommendation: PortfolioData["recommendations"][number]) {
+  if (recommendation.linkedAssetId) return recommendation.linkedAssetId;
+  const query = recommendation.href?.split("?")[1];
+  if (!query) return null;
+  return new URLSearchParams(query).get("asset_id");
+}
+
+function recommendationWhatIfHref(recommendation: PortfolioData["recommendations"][number], data: PortfolioData) {
+  const assetId = recommendationAssetId(recommendation);
+  if (!assetId) return null;
+
+  const position = data.positions.find((item) => item.asset_id === assetId);
+  const account = position ? data.accounts.find((item) => item.id === position.account_id) : data.accounts.find((item) => item.status === "active") ?? data.accounts[0];
+  if (!account) return null;
+
+  const asset = data.assets.find((item) => item.id === assetId);
+  const params = new URLSearchParams();
+  params.set("asset_id", assetId);
+  params.set("account_id", account.id);
+  params.set("source_recommendation_id", recommendation.id);
+  params.set("currency_code", position?.currency_code ?? asset?.currency_code ?? account.currency_code ?? data.family?.baseCurrency ?? "RUB");
+  const price = position?.market_price ?? position?.average_price;
+  if (price !== null && price !== undefined) params.set("price", String(price));
+  return `/what-if?${params.toString()}`;
 }
 
 function newsKindLabel(kind: string) {
@@ -387,6 +474,51 @@ function MetricCard({ hint, label, testId, value }: { label: string; value: stri
   );
 }
 
+function DashboardStage6Actions({ data, dashboardPeriod }: { data: PortfolioData; dashboardPeriod: PeriodKey }) {
+  return (
+    <div className="grid gap-4 rounded-3xl border border-border bg-surface p-4 xl:grid-cols-[minmax(180px,1fr)_minmax(0,3fr)]" data-testid="dashboard-stage-6-actions">
+      <div>
+        <p className="text-sm font-medium">What-if и экспорт</p>
+        <p className="mt-1 text-xs text-muted">Сценарии считаются без записи операций.</p>
+      </div>
+      <div className="grid gap-3 lg:grid-cols-[auto_1fr]">
+        <div className="flex flex-wrap gap-2">
+          <Link className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" href="/what-if">
+            What-if
+          </Link>
+        </div>
+        <form action="/api/portfolio/export" className="grid gap-2 md:grid-cols-[1fr_1fr_1fr_auto_auto]" data-testid="dashboard-export-form" method="get">
+          <select aria-label="Период отчета" className="h-10 rounded-2xl border border-border bg-background px-3 text-sm" defaultValue={dashboardPeriod} name="period">
+            <option value="1M">1M</option>
+            <option value="3M">3M</option>
+            <option value="YTD">YTD</option>
+            <option value="1Y">1Y</option>
+            <option value="All">All</option>
+          </select>
+          <select aria-label="Портфель отчета" className="h-10 rounded-2xl border border-border bg-background px-3 text-sm" defaultValue="" name="portfolio_id">
+            <option value="">Все портфели</option>
+            {data.portfolios.map((portfolio) => (
+              <option key={portfolio.id} value={portfolio.id}>{portfolio.name}</option>
+            ))}
+          </select>
+          <select aria-label="Счет отчета" className="h-10 rounded-2xl border border-border bg-background px-3 text-sm" defaultValue="" name="account_id">
+            <option value="">Все счета</option>
+            {data.accounts.map((account) => (
+              <option key={account.id} value={account.id}>{account.name}</option>
+            ))}
+          </select>
+          <button className="h-10 rounded-2xl border border-border bg-background px-4 text-sm font-medium" name="format" type="submit" value="excel">
+            Excel
+          </button>
+          <button className="h-10 rounded-2xl border border-border bg-background px-4 text-sm font-medium" name="format" type="submit" value="pdf-html">
+            Печать
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function DashboardView({ data, dashboardPeriod }: { data: PortfolioData; dashboardPeriod: PeriodKey }) {
   const activeAccounts = data.accounts.filter((account) => account.status === "active").length;
   const analytics = data.analytics;
@@ -406,6 +538,8 @@ function DashboardView({ data, dashboardPeriod }: { data: PortfolioData; dashboa
 
   return (
     <div className="space-y-8" data-testid="dashboard-view">
+      <DashboardStage6Actions dashboardPeriod={dashboardPeriod} data={data} />
+
       <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6" data-testid="dashboard-kpi-grid">
         <MetricCard hint={`Оценка на ${analytics.asOf}`} label="Стоимость" testId="dashboard-kpi-total-value" value={formatMoney(analytics.totalValue, baseCurrency)} />
         <MetricCard hint={`Денежные остатки в ${baseCurrency}`} label="Кэш" testId="dashboard-kpi-cash" value={formatMoney(analytics.cashValue, baseCurrency)} />
@@ -1368,6 +1502,8 @@ function AssetDetailView({ asset, data }: { asset: PortfolioData["assets"][numbe
     .at(-1);
   const isWatched = data.watchlistItems.some((item) => item.item_type === "asset" && item.asset_id === asset.id);
   const canEdit = canEditFamilyData(data.family?.role);
+  const defaultScenarioPosition = assetPositions[0];
+  const assetScenarioHref = `/what-if?asset_id=${encodeURIComponent(asset.id)}${defaultScenarioPosition ? `&account_id=${encodeURIComponent(defaultScenarioPosition.account_id)}&currency_code=${encodeURIComponent(defaultScenarioPosition.currency_code)}&price=${encodeURIComponent(String(defaultScenarioPosition.market_price ?? defaultScenarioPosition.average_price ?? ""))}` : ""}`;
 
   return (
     <section className="space-y-6 rounded-3xl border border-border bg-surface p-6" data-testid="asset-detail">
@@ -1380,6 +1516,9 @@ function AssetDetailView({ asset, data }: { asset: PortfolioData["assets"][numbe
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Link className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" href={assetScenarioHref}>
+            What-if
+          </Link>
           {canEdit && !isWatched && (
             <form action={addAssetToWatchlist}>
               <input name="return_to" type="hidden" value="/assets" />
@@ -2752,6 +2891,7 @@ function RecommendationsView({ data, filters }: { data: PortfolioData; filters: 
             .map((link) => accountById.get(link.entity_id))
             .filter((account): account is NonNullable<typeof account> => Boolean(account));
           const isRead = readIds.has(recommendation.id);
+          const whatIfHref = recommendationWhatIfHref(recommendation, data);
 
           return (
           <article className="rounded-3xl border border-border bg-surface p-6" data-testid="recommendation-card" key={recommendation.id}>
@@ -2848,9 +2988,15 @@ function RecommendationsView({ data, filters }: { data: PortfolioData; filters: 
                   </button>
                 </form>
               )}
-              <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium text-muted" disabled type="button">
-                What-if на этапе 6
-              </button>
+              {whatIfHref ? (
+                <Link className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" href={whatIfHref}>
+                  What-if
+                </Link>
+              ) : (
+                <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium text-muted" disabled type="button">
+                  What-if недоступен
+                </button>
+              )}
             </div>
           </article>
           );
@@ -3343,6 +3489,299 @@ function EventsView({ data, filters }: { data: PortfolioData; filters: EventFilt
   );
 }
 
+function scenarioTypeLabel(type: string | undefined) {
+  return type === "sell" ? "Продажа" : "Покупка";
+}
+
+function diagnosticTone(severity: string) {
+  if (severity === "error") return "border-red-200 bg-red-50 text-red-900";
+  if (severity === "warning") return "border-amber-200 bg-amber-50 text-amber-950";
+  return "border-blue-200 bg-blue-50 text-blue-900";
+}
+
+type SuccessfulWhatIfScenarioResult = Extract<WhatIfScenarioResult, { ok: true }>;
+
+function ScenarioResultSummary({ result }: { result: SuccessfulWhatIfScenarioResult }) {
+  const totalMetric = result.metrics.find((metric) => metric.label === "Стоимость портфеля");
+  const cashMetric = result.metrics.find((metric) => metric.label === "Кэш");
+  const quantityMetric = result.metrics.find((metric) => metric.label === "Количество актива");
+  const limitDelta = result.after.limitCheck.violations.length - result.before.limitCheck.violations.length;
+
+  return (
+    <div className="grid gap-3 md:grid-cols-4" data-testid="what-if-summary">
+      {totalMetric && (
+        <div className="rounded-3xl border border-border bg-surface p-4">
+          <p className="text-xs text-muted">Стоимость</p>
+          <p className={`mt-2 text-lg font-semibold ${deltaTone(totalMetric.delta)}`}>{formatScenarioMetricDelta(totalMetric)}</p>
+          <p className="mt-1 text-xs text-muted">После: {formatScenarioMetricValue(totalMetric, totalMetric.after)}</p>
+        </div>
+      )}
+      {cashMetric && (
+        <div className="rounded-3xl border border-border bg-surface p-4">
+          <p className="text-xs text-muted">Кэш</p>
+          <p className={`mt-2 text-lg font-semibold ${deltaTone(cashMetric.delta)}`}>{formatScenarioMetricDelta(cashMetric)}</p>
+          <p className="mt-1 text-xs text-muted">После: {formatScenarioMetricValue(cashMetric, cashMetric.after)}</p>
+        </div>
+      )}
+      {quantityMetric && (
+        <div className="rounded-3xl border border-border bg-surface p-4">
+          <p className="text-xs text-muted">Количество</p>
+          <p className={`mt-2 text-lg font-semibold ${deltaTone(quantityMetric.delta)}`}>{formatScenarioMetricDelta(quantityMetric)}</p>
+          <p className="mt-1 text-xs text-muted">{result.input.scenarioType === "sell" ? "Продажа" : "Покупка"} · {formatMoney(result.input.price, result.input.currencyCode)}</p>
+        </div>
+      )}
+      <div className="rounded-3xl border border-border bg-surface p-4">
+        <p className="text-xs text-muted">Лимиты</p>
+        <p className={`mt-2 text-lg font-semibold ${deltaTone(limitDelta)}`}>{limitDelta > 0 ? "+" : ""}{limitDelta}</p>
+        <p className="mt-1 text-xs text-muted">После: {result.after.limitCheck.violations.length} наруш.</p>
+      </div>
+    </div>
+  );
+}
+
+function WhatIfView({ data, input }: { data: PortfolioData; input: WhatIfFormInput }) {
+  const accounts = data.accounts.filter((account) => account.status === "active");
+  const assets = data.assets.filter((asset) => asset.status === "active" && asset.asset_type_code !== "cash");
+  const defaultAccount = accounts.find((account) => account.id === input.accountId) ?? accounts[0];
+  const defaultAsset = assets.find((asset) => asset.id === input.assetId) ?? assets[0];
+  const selectedAsset = assets.find((asset) => asset.id === input.assetId) ?? defaultAsset;
+  const selectedAccount = accounts.find((account) => account.id === input.accountId) ?? defaultAccount;
+  const selectedPosition = data.positions.find((position) => position.asset_id === selectedAsset?.id && (!selectedAccount || position.account_id === selectedAccount.id));
+  const currencyOptions = Array.from(new Set([
+    data.family?.baseCurrency ?? "RUB",
+    selectedAccount?.currency_code,
+    selectedAsset?.currency_code,
+    selectedPosition?.currency_code,
+    ...data.cashBalances.map((balance) => balance.currency_code),
+  ].filter((value): value is string => Boolean(value)))).sort();
+  const scenarioType = input.scenarioType === "sell" ? "sell" : "buy";
+  const currencyCode = input.currencyCode ?? selectedPosition?.currency_code ?? selectedAsset?.currency_code ?? selectedAccount?.currency_code ?? data.family?.baseCurrency ?? "RUB";
+  const tradeDate = input.tradeDate ?? todayIsoDate();
+  const sourceRecommendation = input.sourceRecommendationId
+    ? data.recommendations.find((recommendation) => recommendation.id === input.sourceRecommendationId)
+    : null;
+  const quantity = parseQueryNumber(input.quantity);
+  const price = parseQueryNumber(input.price);
+  const commission = parseQueryNumber(input.commission) ?? 0;
+  const availableScenarioCash = data.cashBalances
+    .filter((balance) => balance.account_id === selectedAccount?.id && balance.currency_code === currencyCode)
+    .reduce((total, balance) => total + balance.balance, 0);
+  const availableScenarioQuantity = data.positions
+    .filter((position) => position.account_id === selectedAccount?.id && position.asset_id === selectedAsset?.id && position.currency_code === currencyCode)
+    .reduce((total, position) => total + position.quantity, 0);
+  const estimatedAmount = quantity !== null && price !== null ? quantity * price + commission : null;
+  const shouldRun = whatIfInputHasSubmission(input) && Boolean(input.quantity || input.price);
+  const result: WhatIfScenarioResult | null = shouldRun && data.family
+    ? runWhatIfScenario({
+      scenarioType,
+      familyId: data.family.id,
+      accountId: selectedAccount?.id ?? "",
+      assetId: selectedAsset?.id ?? "",
+      tradeDate,
+      quantity,
+      price,
+      currencyCode,
+      commission,
+      sourceRecommendationId: input.sourceRecommendationId ?? null,
+    }, {
+      familyId: data.family.id,
+      accounts: data.accounts,
+      assets: data.assets,
+      operations: data.operations,
+      positionSnapshots: data.positionSnapshots,
+      positions: data.positions,
+      cashBalances: data.cashBalances,
+      limits: data.limits,
+      baseCurrency: data.family.baseCurrency,
+    })
+    : null;
+
+  return (
+    <div className="space-y-6" data-testid="what-if-view">
+      <form action="/what-if" className="rounded-3xl border border-border bg-surface p-6" data-testid="what-if-form">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold">Сценарий по одному активу</h2>
+            <p className="mt-1 text-sm text-muted">Расчет выполняется без записи операции и без изменения текущих позиций.</p>
+          </div>
+          {sourceRecommendation && (
+            <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" href="/recommendations">
+              Из рекомендации
+            </Link>
+          )}
+        </div>
+
+        {sourceRecommendation && (
+          <div className="mt-5 rounded-2xl border border-border bg-background p-4 text-sm">
+            <p className="font-medium">{sourceRecommendation.title}</p>
+            <p className="mt-1 text-muted">{sourceRecommendation.reason ?? recommendationTypeLabel(sourceRecommendation.recommendation_type)}</p>
+          </div>
+        )}
+
+        <input name="source_recommendation_id" type="hidden" value={input.sourceRecommendationId ?? ""} />
+        <div className="mt-5 grid gap-4 md:grid-cols-4">
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Операция</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="what-if-scenario-type" defaultValue={scenarioType} name="scenario_type">
+              <option value="buy">Покупка</option>
+              <option value="sell">Продажа</option>
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Счет</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="what-if-account-select" defaultValue={selectedAccount?.id ?? ""} name="account_id" required>
+              {accounts.map((account) => (
+                <option key={account.id} value={account.id}>{account.name} · {account.currency_code}</option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Актив</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="what-if-asset-select" defaultValue={selectedAsset?.id ?? ""} name="asset_id" required>
+              {assets.map((asset) => (
+                <option key={asset.id} value={asset.id}>{asset.name} · {asset.ticker ?? asset.currency_code ?? "—"}</option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Дата</span>
+            <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="what-if-trade-date-input" defaultValue={tradeDate} name="trade_date" required type="date" />
+          </label>
+        </div>
+
+        <div className="mt-4 grid gap-4 md:grid-cols-4">
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Количество</span>
+            <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="what-if-quantity-input" defaultValue={input.quantity ?? ""} min="0.0000001" name="quantity" placeholder="10" required step="0.0000001" type="number" />
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Цена</span>
+            <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="what-if-price-input" defaultValue={input.price ?? selectedPosition?.market_price ?? selectedPosition?.average_price ?? ""} min="0.0000001" name="price" placeholder="100" required step="0.0000001" type="number" />
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Валюта</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="what-if-currency-select" defaultValue={currencyCode} name="currency_code">
+              {currencyOptions.map((currency) => (
+                <option key={currency} value={currency}>{currency}</option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Комиссия</span>
+            <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="what-if-commission-input" defaultValue={input.commission ?? "0"} min="0" name="commission" step="0.01" type="number" />
+          </label>
+        </div>
+
+        <div className="mt-5 grid gap-3 md:grid-cols-3" data-testid="what-if-context">
+          <div className="rounded-2xl border border-border bg-background p-4">
+            <p className="text-xs text-muted">Кэш на счете</p>
+            <p className="mt-2 font-semibold">{formatMoney(availableScenarioCash, currencyCode)}</p>
+          </div>
+          <div className="rounded-2xl border border-border bg-background p-4">
+            <p className="text-xs text-muted">Позиция в валюте сценария</p>
+            <p className="mt-2 font-semibold">{formatNumber(availableScenarioQuantity, 6)}</p>
+          </div>
+          <div className="rounded-2xl border border-border bg-background p-4">
+            <p className="text-xs text-muted">Сумма сделки</p>
+            <p className="mt-2 font-semibold">{estimatedAmount === null ? "—" : formatMoney(estimatedAmount, currencyCode)}</p>
+          </div>
+        </div>
+
+        <div className="mt-5 flex flex-wrap gap-2">
+          <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" data-testid="what-if-submit-button" type="submit">
+            Рассчитать
+          </button>
+          <Link className="h-11 rounded-2xl border border-border px-5 py-3 text-sm font-medium" href="/what-if">
+            Сбросить
+          </Link>
+        </div>
+      </form>
+
+      {!result && <EmptyState text="Заполните параметры сделки и запустите расчет. Сценарий будет построен только в памяти." />}
+
+      {result && result.diagnostics.length > 0 && (
+        <section className="grid gap-3 md:grid-cols-2">
+          {result.diagnostics.map((diagnostic) => (
+            <div className={`rounded-3xl border p-4 text-sm ${diagnosticTone(diagnostic.severity)}`} key={`${diagnostic.code}:${diagnostic.message}`}>
+              <p className="font-medium">{diagnostic.severity === "error" ? "Расчет остановлен" : "Ограничение данных"}</p>
+              <p className="mt-1">{diagnostic.message}</p>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {result?.ok && (
+        <section className="space-y-6">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-border bg-surface p-4">
+            <div>
+              <p className="text-sm font-medium">{scenarioTypeLabel(result.input.scenarioType)} · {selectedAsset?.name ?? "Актив"}</p>
+              <p className="mt-1 text-xs text-muted">{selectedAccount?.name ?? "Счет"} · {formatNumber(result.input.quantity, 6)} × {formatMoney(result.input.price, result.input.currencyCode)}</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" data-testid="what-if-export-excel-link" href={whatIfExportHref(input, "excel")}>
+                Excel со сценарием
+              </Link>
+              <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" data-testid="what-if-export-pdf-link" href={whatIfExportHref(input, "pdf-html")}>
+                PDF preview
+              </Link>
+            </div>
+          </div>
+
+          <ScenarioResultSummary result={result} />
+
+          <div className="grid gap-4 md:grid-cols-4">
+            <MetricCard label="Стоимость после" value={formatMoney(result.after.analytics.totalValue, data.family?.baseCurrency ?? "RUB")} hint={`Дельта: ${formatSignedMoney(result.after.analytics.totalValue - result.before.analytics.totalValue, data.family?.baseCurrency ?? "RUB")}`} />
+            <MetricCard label="Кэш после" value={formatMoney(result.after.analytics.cashValue, data.family?.baseCurrency ?? "RUB")} hint={`Дельта: ${formatSignedMoney(result.after.analytics.cashValue - result.before.analytics.cashValue, data.family?.baseCurrency ?? "RUB")}`} />
+            <MetricCard label="Лимиты" value={result.after.limitCheck.violations.length} hint={`До сценария: ${result.before.limitCheck.violations.length}`} />
+            <MetricCard label="XIRR" value={formatPercent(result.after.analytics.xirr.value)} hint={xirrStatusLabel(result.after.analytics.xirr.status)} />
+          </div>
+
+          <div className="overflow-hidden rounded-3xl border border-border bg-surface" data-testid="what-if-comparison">
+            <div className="border-b border-border p-6">
+              <h2 className="text-lg font-semibold">Сравнение</h2>
+              <p className="mt-2 text-sm text-muted">Значения до и после сценария. Денежные показатели показываются в доступной валюте расчета.</p>
+            </div>
+            <table className="w-full min-w-[760px] text-left text-sm">
+              <thead className="border-b border-border text-muted">
+                <tr>
+                  <th className="px-5 py-4 font-medium">Метрика</th>
+                  <th className="px-5 py-4 font-medium">Сейчас</th>
+                  <th className="px-5 py-4 font-medium">После</th>
+                  <th className="px-5 py-4 font-medium">Дельта</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.metrics.map((metric) => (
+                  <tr className="border-b border-border last:border-0" key={metric.label}>
+                    <td className="px-5 py-4 font-medium">{metric.label}</td>
+                    <td className="px-5 py-4 text-muted">{formatScenarioMetricValue(metric, metric.before)}</td>
+                    <td className="px-5 py-4 text-muted">{formatScenarioMetricValue(metric, metric.after)}</td>
+                    <td className="px-5 py-4 font-medium">{formatScenarioMetricDelta(metric)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {(result.after.limitCheck.violations.length > 0 || result.after.limitCheck.issues.length > 0) && (
+            <div className="rounded-3xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-950">
+              <h2 className="font-semibold">Лимиты и риски после сценария</h2>
+              <div className="mt-3 space-y-2">
+                {result.after.limitCheck.violations.map((violation) => (
+                  <p key={violation.fingerprint}>{violation.title}: {formatPercent(violation.currentValue)} при пороге {formatPercent(violation.thresholdValue)}</p>
+                ))}
+                {result.after.limitCheck.issues.map((issue) => (
+                  <p key={`${issue.limitId}:${issue.reason}`}>{issue.message}</p>
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
 function PlaceholderView({ section }: { section: string }) {
   const details: Record<string, string> = {
     recommendations: "Таблица рекомендаций уже создана. Интерфейс добавим после первого слоя операций и позиций.",
@@ -3367,6 +3806,7 @@ function SectionContent({
   recommendationFilters,
   newsFilters,
   watchlistFilters,
+  whatIfInput,
   eventFilters,
   operationError,
   operationCancelled,
@@ -3397,6 +3837,7 @@ function SectionContent({
   recommendationFilters: RecommendationFilterInput;
   newsFilters: NewsFilterInput;
   watchlistFilters: WatchlistFilterInput;
+  whatIfInput: WhatIfFormInput;
   eventFilters: EventFilterInput;
   operationError?: string;
   operationCancelled?: string;
@@ -3417,6 +3858,7 @@ function SectionContent({
   if (!data.family) return <EmptyState text="Для пользователя пока не назначена семья. Нужно добавить запись в family_members." />;
 
   if (section === "dashboard") return <DashboardView dashboardPeriod={dashboardPeriod} data={data} />;
+  if (section === "what-if") return <WhatIfView data={data} input={whatIfInput} />;
   if (section === "accounts") return <AccountsView data={data} operationCancelled={operationCancelled} operationError={operationError} operationSaved={operationSaved} selectedAccountId={selectedAccountId} />;
   if (section === "assets") return <AssetsView data={data} operationCancelled={operationCancelled} operationError={operationError} operationSaved={operationSaved} positionFilters={positionFilters} priceError={priceError} priced={priced} selectedAssetId={selectedAssetId} />;
   if (section === "import") {
@@ -3520,6 +3962,17 @@ export default async function SectionPage({
     type: queryValue(query.watchlist_type),
     status: queryValue(query.watchlist_status),
   };
+  const whatIfInput: WhatIfFormInput = {
+    scenarioType: queryValue(query.scenario_type),
+    accountId: queryValue(query.account_id),
+    assetId: queryValue(query.asset_id),
+    tradeDate: queryValue(query.trade_date),
+    quantity: queryValue(query.quantity),
+    price: queryValue(query.price),
+    currencyCode: queryValue(query.currency_code),
+    commission: queryValue(query.commission),
+    sourceRecommendationId: queryValue(query.source_recommendation_id),
+  };
   const eventFilters: EventFilterInput = {
     type: queryValue(query.event_type_filter),
   };
@@ -3546,6 +3999,7 @@ export default async function SectionPage({
           recommendationFilters={recommendationFilters}
           newsFilters={newsFilters}
           watchlistFilters={watchlistFilters}
+          whatIfInput={whatIfInput}
           eventFilters={eventFilters}
           priceError={queryValue(query.price_error)}
           parsed={queryValue(query.parsed)}

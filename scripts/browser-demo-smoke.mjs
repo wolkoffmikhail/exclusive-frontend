@@ -370,6 +370,64 @@ async function assertStage5Signals(page) {
   console.log("ok stage 5 events");
 }
 
+async function assertDownloadLink(page, testId, { extension, contentType }) {
+  const link = page.getByTestId(testId);
+  await assertVisible(link, `${testId} should be visible`);
+
+  const href = await link.first().getAttribute("href");
+  assert(href, `${testId} should expose an href`);
+
+  const response = await page.request.get(new URL(href, baseUrl).toString());
+  assert(response.status() === 200, `${testId}: expected HTTP 200, got ${response.status()}`);
+  const responseContentType = response.headers()["content-type"] || "";
+  assert(responseContentType.includes(contentType), `${testId}: expected content type ${contentType}, got ${responseContentType}`);
+
+  const disposition = response.headers()["content-disposition"] || "";
+  assert(disposition.includes(extension), `${testId}: expected attachment filename with ${extension}, got ${disposition}`);
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download", { timeout: 30_000 }),
+    link.first().click(),
+  ]);
+  assert(download.suggestedFilename().endsWith(extension), `${testId}: expected downloaded ${extension} file`);
+  await download.cancel().catch(() => {});
+}
+
+async function assertStage6WhatIfAndExport(page) {
+  await page.goto(`${baseUrl}/what-if`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("what-if-view"), "editor should open what-if");
+  await assertVisible(page.getByTestId("what-if-form"), "what-if should show scenario form");
+  await assertVisible(page.getByTestId("what-if-context"), "what-if should show scenario context");
+
+  const accountOptions = await page.getByTestId("what-if-account-select").locator("option").evaluateAll((options) => options.filter((option) => option.value).length);
+  const assetOptions = await page.getByTestId("what-if-asset-select").locator("option").evaluateAll((options) => options.filter((option) => option.value).length);
+  assert(accountOptions > 0, "what-if smoke needs at least one active account");
+  assert(assetOptions > 0, "what-if smoke needs at least one active non-cash asset");
+
+  await page.getByTestId("what-if-scenario-type").selectOption("buy");
+  await page.getByTestId("what-if-quantity-input").fill("0.0000001");
+  await page.getByTestId("what-if-price-input").fill("0.0000001");
+  await page.getByTestId("what-if-commission-input").fill("0");
+  await submitActionForm(
+    page,
+    page.getByTestId("what-if-submit-button"),
+    (url) => url.pathname === "/what-if" && url.searchParams.get("quantity") === "0.0000001" && url.searchParams.get("price") === "0.0000001",
+  );
+
+  await assertVisible(page.getByTestId("what-if-summary"), "what-if should show scenario summary");
+  await assertVisible(page.getByTestId("what-if-comparison"), "what-if should show comparison table");
+
+  await assertDownloadLink(page, "what-if-export-excel-link", {
+    extension: ".xlsx",
+    contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  await assertDownloadLink(page, "what-if-export-pdf-link", {
+    extension: ".html",
+    contentType: "text/html",
+  });
+  console.log("ok stage 6 what-if and export downloads");
+}
+
 async function ensureLinkedEvent(page) {
   if (await isVisible(page.getByTestId("event-asset-link"))) return;
 
@@ -404,6 +462,7 @@ async function assertEditorImportFlow(page) {
     console.log("ok duplicate upload protection before fresh import; continuing with existing demo data");
     await assertDashboardAnalytics(page);
     await assertStage5Signals(page);
+    await assertStage6WhatIfAndExport(page);
 
     await page.goto(`${baseUrl}/assets`, { waitUntil: "networkidle" });
     await assertVisible(page.getByTestId("assets-view"), "editor should open assets");
@@ -440,6 +499,7 @@ async function assertEditorImportFlow(page) {
 
   await assertDashboardAnalytics(page);
   await assertStage5Signals(page);
+  await assertStage6WhatIfAndExport(page);
 
   await page.goto(`${baseUrl}/assets`, { waitUntil: "networkidle" });
   await assertVisible(page.getByTestId("assets-view"), "editor should open assets");
