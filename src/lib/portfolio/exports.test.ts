@@ -120,6 +120,13 @@ function data(overrides: Partial<PortfolioData> = {}): PortfolioData {
     systemAlerts: [],
     notificationPreferences: [],
     notificationDeliveries: [],
+    newsSources: [],
+    sourceDocuments: [],
+    sourceDocumentLinks: [],
+    llmAnalyses: [],
+    advisorThreads: [],
+    advisorMessages: [],
+    issuerAliases: [],
     ...overrides,
   };
 }
@@ -209,6 +216,66 @@ describe("portfolio exports", () => {
 
     expect(workbook.SheetNames).toContain("Summary");
     expect(workbook.SheetNames).toContain("Positions");
+  });
+
+  it("includes a marked LLM summary with citations and limitations when requested", () => {
+    const viewModel = buildPortfolioExportViewModel({
+      data: data({
+        sourceDocuments: [{
+          id: "document-1",
+          family_id: familyId,
+          source_id: "source-1",
+          external_id: "press-1",
+          title: "Issuer disclosure",
+          url: "https://example.test/disclosure",
+          published_at: "2026-07-20T10:00:00.000Z",
+          issuer_name: "Demo issuer",
+          ticker: "DEMO",
+          isin: null,
+          document_type: "disclosure",
+          trust_level: "manual",
+          raw_excerpt: "Disclosure text",
+          content_hash: "hash-1",
+          language: "en",
+          payload: {},
+          created_at: "2026-07-20T10:01:00.000Z",
+          updated_at: "2026-07-20T10:01:00.000Z",
+        }],
+        llmAnalyses: [{
+          id: "analysis-1",
+          family_id: familyId,
+          source_document_id: "document-1",
+          analysis_type: "report_summary",
+          model: "test-model",
+          prompt_version: "report-summary-v1",
+          status: "ready",
+          summary: "Portfolio has one high-priority concentration note.",
+          facts: [],
+          portfolio_links: [],
+          impact_level: "medium",
+          confidence: 0.72,
+          limitations: ["Only saved source documents were included."],
+          citations: [{ title: "Issuer disclosure", url: "https://example.test/disclosure" }],
+          suggested_actions: [],
+          what_if_prefill: null,
+          safety_flags: ["service_role_secret_should_not_export"],
+          created_at: "2026-07-20T10:02:00.000Z",
+          updated_at: "2026-07-20T10:02:00.000Z",
+        }],
+      }),
+      scope: { includeLlmSummary: true },
+    });
+    const llmSummary = viewModel.sheets.find((sheet) => sheet.name === "LLM Summary");
+    const html = buildPortfolioReportHtml(viewModel);
+
+    expect(llmSummary?.rows).toContainEqual(expect.objectContaining({
+      "Generated marker": "LLM-generated section; verify citations",
+      "Citations": "Issuer disclosure (https://example.test/disclosure)",
+      "Limitations": "Only saved source documents were included.",
+    }));
+    expect(html).toContain("LLM-generated");
+    expect(html).toContain("Only saved source documents were included.");
+    expect(html).not.toContain("service_role_secret_should_not_export");
   });
 
   it("recalculates summary for account-scoped exports", () => {

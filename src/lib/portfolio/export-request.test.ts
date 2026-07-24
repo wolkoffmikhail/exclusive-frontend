@@ -60,6 +60,13 @@ function data(): PortfolioData {
     systemAlerts: [],
     notificationPreferences: [],
     notificationDeliveries: [],
+    newsSources: [],
+    sourceDocuments: [],
+    sourceDocumentLinks: [],
+    llmAnalyses: [],
+    advisorThreads: [],
+    advisorMessages: [],
+    issuerAliases: [],
   };
 }
 
@@ -109,6 +116,7 @@ describe("portfolio export request helpers", () => {
       portfolio_id: "portfolio-1",
       account_id: "account-1",
       include_scenario: "1",
+      include_llm_summary: "1",
     }));
 
     expect(request).toEqual({
@@ -118,6 +126,7 @@ describe("portfolio export request helpers", () => {
         portfolioId: "portfolio-1",
         accountId: "account-1",
         includeScenario: true,
+        includeLlmSummary: true,
       },
     });
   });
@@ -150,7 +159,7 @@ describe("portfolio export request helpers", () => {
       format: "excel",
       generatedAt: "2026-07-22T09:00:00.000Z",
       scenario: scenario(),
-      scope: { period: "All", accountId: "account-1", portfolioId: "portfolio-1", includeScenario: true },
+      scope: { period: "All", accountId: "account-1", portfolioId: "portfolio-1", includeScenario: true, includeLlmSummary: true },
       sheets: ["Summary", "Scenario"],
       warningsCount: 2,
     });
@@ -161,6 +170,7 @@ describe("portfolio export request helpers", () => {
       portfolio_id: "portfolio-1",
       account_id: "account-1",
       include_scenario: true,
+      include_llm_summary: true,
       scenario_ok: true,
       scenario_type: "sell",
       generated_at: "2026-07-22T09:00:00.000Z",
@@ -168,6 +178,7 @@ describe("portfolio export request helpers", () => {
       warnings_count: 2,
     });
     expect(JSON.stringify(payload)).not.toContain("virtualOperation");
+    expect(JSON.stringify(payload)).not.toContain("citations");
+    expect(JSON.stringify(payload)).not.toContain("prompt");
   });
 });
-

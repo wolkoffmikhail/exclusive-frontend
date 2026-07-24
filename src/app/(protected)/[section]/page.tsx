@@ -1,11 +1,15 @@
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import type { PeriodKey, StructureSlice } from "@/lib/portfolio/analytics";
+import { buildAdvisorWhatIfHref } from "@/lib/portfolio/advisor-what-if";
+import { buildDashboardTodayItems } from "@/lib/portfolio/dashboard-today";
 import { getActiveFamily, getPortfolioData, type Account, type ImportJob, type Operation, type PortfolioData, type Position } from "@/lib/portfolio/data";
 import { filterPortfolioEvents, splitPortfolioEvents, type EventFilterInput } from "@/lib/portfolio/events";
 import { filterAndSortPositions, groupPositionsByAssetType, type PositionFilterInput } from "@/lib/portfolio/position-filters";
 import { canEditFamilyData, canManageFamily } from "@/lib/portfolio/permissions";
+import { latestRecommendationExplanationById } from "@/lib/portfolio/recommendation-explanations";
 import { runWhatIfScenario, type ScenarioMetricDelta, type WhatIfScenarioResult } from "@/lib/portfolio/scenarios";
+import { sourceDocumentsForAsset } from "@/lib/portfolio/source-document-filters";
 import { filterWatchlistItems, type WatchlistFilterInput } from "@/lib/portfolio/watchlist";
 import { createClient } from "@/lib/supabase/server";
 import { applyBrokerImport, deleteFailedImport, parseBrokerImport, restoreImportRow, skipImportRow, uploadBrokerReport } from "./import-actions";
@@ -13,6 +17,8 @@ import { cancelManualOperation, createBuyOperation, createCashTransferOperation,
 import { saveManualPositionPrice } from "./position-actions";
 import { createAccount, createPortfolio } from "./settings-actions";
 import { addAssetToWatchlist, addNewsToWatchlist, archiveLimit, archiveWatchlistItem, checkLimits, createDefaultLimits, createLimit, createNewsItem, createPortfolioEvent, markRecommendationRead, saveMaxSettings, saveRecommendationToWatchlist, saveTelegramSettings, testMaxNotification, testTelegramNotification, updateLimit, updatePortfolioEvent, updateRecommendationStatus, updateWatchlistItem } from "./stage5-actions";
+import { analyzeSourceDocument, askAdvisor, createManualSourceDocument, explainRecommendation, ingestCbrRss, syncMoexIssuerAliases, updateSourceDocumentLinkStatus } from "./stage7-actions";
+import { AdvisorSubmitButton } from "./advisor-submit-button";
 
 const sections: Record<string, { title: string; description: string }> = {
   dashboard: { title: "Обзор портфеля", description: "Структура семейного портфеля, счета, активы и ближайшие действия." },
@@ -22,6 +28,7 @@ const sections: Record<string, { title: string; description: string }> = {
   recommendations: { title: "Рекомендации", description: "Сигналы и предложения по управлению портфелем." },
   "what-if": { title: "What-if", description: "Проверка покупки или продажи одного актива без изменения учётных данных." },
   news: { title: "Новости", description: "Новости, связанные с активами портфеля." },
+  advisor: { title: "Советник", description: "Вопросы по портфелю, разбор материалов и сохранённая история ответов с источниками." },
   watchlist: { title: "Watchlist", description: "Активы и идеи для наблюдения." },
   events: { title: "События", description: "Дивиденды, купоны, погашения и другие события." },
   settings: { title: "Настройки", description: "Семья, пользователи, роли, валюты и правила импорта." },
@@ -487,7 +494,7 @@ function DashboardStage6Actions({ data, dashboardPeriod }: { data: PortfolioData
             What-if
           </Link>
         </div>
-        <form action="/api/portfolio/export" className="grid gap-2 md:grid-cols-[1fr_1fr_1fr_auto_auto]" data-testid="dashboard-export-form" method="get">
+        <form action="/api/portfolio/export" className="grid gap-2 md:grid-cols-[1fr_1fr_1fr_auto_auto_auto]" data-testid="dashboard-export-form" method="get">
           <select aria-label="Период отчета" className="h-10 rounded-2xl border border-border bg-background px-3 text-sm" defaultValue={dashboardPeriod} name="period">
             <option value="1M">1M</option>
             <option value="3M">3M</option>
@@ -507,6 +514,10 @@ function DashboardStage6Actions({ data, dashboardPeriod }: { data: PortfolioData
               <option key={account.id} value={account.id}>{account.name}</option>
             ))}
           </select>
+          <label className="flex h-10 items-center gap-2 rounded-2xl border border-border bg-background px-3 text-sm text-muted">
+            <input className="h-4 w-4 accent-accent" name="include_llm_summary" type="checkbox" value="1" />
+            <span>LLM-summary</span>
+          </label>
           <button className="h-10 rounded-2xl border border-border bg-background px-4 text-sm font-medium" name="format" type="submit" value="excel">
             Excel
           </button>
@@ -531,6 +542,7 @@ function DashboardView({ data, dashboardPeriod }: { data: PortfolioData; dashboa
     .filter((recommendation) => recommendation.status === "open")
     .slice(0, 3);
   const latestNews = data.newsItems.slice(0, 5);
+  const todayItems = buildDashboardTodayItems({ data, limit: 6 });
   const today = todayIsoDate();
   const upcomingEvents = data.events
     .filter((event) => event.status !== "cancelled" && event.event_date >= today)
@@ -579,6 +591,42 @@ function DashboardView({ data, dashboardPeriod }: { data: PortfolioData; dashboa
               </Link>
             );
           })}
+        </section>
+      )}
+
+      {todayItems.length > 0 && (
+        <section className="rounded-3xl border border-border bg-surface p-6" data-testid="dashboard-today-important">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold">Что важно сегодня</h2>
+              <p className="mt-1 text-sm text-muted">Рекомендации, проверяемые материалы и последние объяснения советника.</p>
+            </div>
+            <Link className="text-sm font-medium text-accent" href="/recommendations">Рекомендации</Link>
+          </div>
+          <div className="mt-5 grid gap-3 lg:grid-cols-2">
+            {todayItems.map((item) => (
+              <article className="rounded-2xl border border-border bg-background p-4" key={item.id}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className={`rounded-full px-3 py-1 text-xs ${item.tone === "critical" ? "bg-red-50 text-red-700" : item.tone === "warning" ? "bg-amber-50 text-amber-700" : "bg-blue-50 text-blue-700"}`}>
+                    {item.badge}
+                  </span>
+                  <span className="text-xs text-muted">{formatDateTime(item.createdAt)}</span>
+                </div>
+                <h3 className="mt-3 text-sm font-semibold leading-6">{item.title}</h3>
+                <p className="mt-2 line-clamp-2 text-sm leading-6 text-muted">{item.summary}</p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Link className="rounded-2xl bg-accent px-3 py-2 text-xs font-medium text-white" href={item.href}>
+                    {item.actionLabel}
+                  </Link>
+                  {item.secondaryHref && item.secondaryActionLabel && (
+                    <Link className="rounded-2xl border border-border bg-surface px-3 py-2 text-xs font-medium" href={item.secondaryHref}>
+                      {item.secondaryActionLabel}
+                    </Link>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
         </section>
       )}
 
@@ -1504,6 +1552,14 @@ function AssetDetailView({ asset, data }: { asset: PortfolioData["assets"][numbe
   const canEdit = canEditFamilyData(data.family?.role);
   const defaultScenarioPosition = assetPositions[0];
   const assetScenarioHref = `/what-if?asset_id=${encodeURIComponent(asset.id)}${defaultScenarioPosition ? `&account_id=${encodeURIComponent(defaultScenarioPosition.account_id)}&currency_code=${encodeURIComponent(defaultScenarioPosition.currency_code)}&price=${encodeURIComponent(String(defaultScenarioPosition.market_price ?? defaultScenarioPosition.average_price ?? ""))}` : ""}`;
+  const linkedSourceDocuments = sourceDocumentsForAsset({
+    assetId: asset.id,
+    documents: data.sourceDocuments,
+    links: data.sourceDocumentLinks,
+    analyses: data.llmAnalyses,
+    limit: 6,
+  });
+  const sourceById = new Map(data.newsSources.map((source) => [source.id, source]));
 
   return (
     <section className="space-y-6 rounded-3xl border border-border bg-surface p-6" data-testid="asset-detail">
@@ -1539,6 +1595,69 @@ function AssetDetailView({ asset, data }: { asset: PortfolioData["assets"][numbe
         <MetricCard label="Текущая стоимость" value={formatMoney(marketValue, currency)} hint={latestValuationDate ? `Оценка: ${latestValuationDate}` : "Без ручной цены"} />
         <MetricCard label="P&L" value={formatSignedMoney(pnl, currency)} hint="Нереализованный" />
         <MetricCard label="Операции" value={assetOperations.length} hint="По выбранному активу" />
+      </div>
+
+      <div className="rounded-2xl border border-border bg-background p-5" data-testid="asset-source-documents">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="font-semibold">Связанные документы</h3>
+            <p className="mt-1 text-sm text-muted">Проверяемые материалы Stage 7, привязанные к активу.</p>
+          </div>
+          <Link className="rounded-2xl border border-border bg-surface px-4 py-2 text-sm font-medium" href="/news">
+            Новости
+          </Link>
+        </div>
+        {linkedSourceDocuments.length === 0 ? (
+          <p className="mt-4 text-sm text-muted">Документов с подтвержденной или предложенной связью пока нет.</p>
+        ) : (
+          <div className="mt-4 grid gap-3 xl:grid-cols-2">
+            {linkedSourceDocuments.map(({ document, links, latestAnalysis }) => {
+              const source = sourceById.get(document.source_id);
+              const primaryLink = links[0];
+              const confidence = Number(primaryLink.confidence);
+
+              return (
+                <article className="rounded-2xl border border-border bg-surface p-4" key={document.id}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">{source?.source_name ?? document.trust_level}</span>
+                    <span className="text-xs text-muted">{formatDateTime(document.published_at ?? document.created_at)}</span>
+                  </div>
+                  <h4 className="mt-3 text-sm font-semibold leading-6">{document.title}</h4>
+                  <p className="mt-2 text-xs text-muted">
+                    {document.document_type}
+                    {document.ticker ? ` · ${document.ticker}` : ""}
+                    {document.isin ? ` · ${document.isin}` : ""}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                    {links.map((link) => (
+                      <span className={`rounded-full px-3 py-1 ${link.status === "confirmed" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`} key={link.id}>
+                        {link.status} · {link.link_type} · {formatPercent(Number(link.confidence))}
+                      </span>
+                    ))}
+                  </div>
+                  {latestAnalysis?.summary && (
+                    <div className="mt-3 rounded-2xl border border-border bg-background p-3">
+                      <p className="text-xs font-medium text-muted">
+                        LLM-анализ · {latestAnalysis.impact_level} · {latestAnalysis.confidence === null ? "—" : formatPercent(Number(latestAnalysis.confidence))}
+                      </p>
+                      <p className="mt-2 text-sm leading-6">{latestAnalysis.summary}</p>
+                    </div>
+                  )}
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    {document.url && (
+                      <Link className="rounded-2xl border border-border bg-background px-3 py-2 text-xs font-medium" href={document.url}>
+                        Источник
+                      </Link>
+                    )}
+                    <span className="text-xs text-muted">
+                      Основная связь: {primaryLink.status}, confidence {Number.isFinite(confidence) ? formatPercent(confidence) : "—"}
+                    </span>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="overflow-hidden rounded-2xl border border-border bg-background">
@@ -2616,7 +2735,7 @@ function SettingsView({ data, settingsError, settingsSaved, stage5Error, stage5S
       <SettingsNotice settingsError={settingsError} settingsSaved={settingsSaved} />
       <Stage5Notice stage5Error={stage5Error} stage5Saved={stage5Saved} />
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-4">
         <MetricCard label="Семья" value={data.family?.name ?? "—"} hint={`Ваша роль: ${data.family?.role ?? "—"}`} />
         <MetricCard label="Базовая валюта" value={data.family?.baseCurrency ?? "—"} hint="Берётся из family settings" />
         <MetricCard label="Хранилище" value="broker-reports" hint="Private bucket для отчётов" />
@@ -2788,6 +2907,43 @@ function Stage5Notice({ stage5Error, stage5Saved }: { stage5Error?: string; stag
   );
 }
 
+function Stage7Notice({ stage7Error, stage7Saved }: { stage7Error?: string; stage7Saved?: string }) {
+  const errors: Record<string, string> = {
+    "no-family": "Для пользователя не назначена семья.",
+    forbidden: "У роли viewer нет права изменять данные этого раздела.",
+    "recommendation-not-found": "Рекомендация не найдена.",
+    "recommendation-generated-invalid": "Generated-рекомендацию не удалось сохранить: не хватает данных.",
+    "source-document-required": "Не выбран source document.",
+    "source-document-not-found": "Source document не найден.",
+    "source-document-title-required": "Укажите заголовок source document.",
+    "source-document-content-required": "Добавьте URL или фрагмент source document.",
+    "source-document-link-required": "Не выбрана связь source document.",
+    "source-document-link-not-found": "Связь source document не найдена.",
+    "source-document-link-status-invalid": "Некорректный статус связи source document.",
+    "cbr-rss-fetch-failed": "Не удалось загрузить RSS Банка России.",
+    "advisor-question-required": "Задайте вопрос советнику.",
+    "advisor-thread-not-found": "Диалог советника не найден.",
+  };
+  const saved: Record<string, string> = {
+    "source-document": "Source document сохранён.",
+    "source-document-link-status": "Статус связи source document обновлён.",
+    "source-document-analysis": "LLM-анализ source document сохранён.",
+    "source-document-analysis-failed": "LLM-анализ source document завершился ошибкой.",
+    "recommendation-explanation": "Объяснение рекомендации сохранено.",
+    "recommendation-explanation-failed": "Объяснение рекомендации завершилось ошибкой.",
+    "cbr-rss": "RSS Банка России обработан.",
+    "moex-aliases": "MOEX aliases обновлены.",
+    "advisor-message": "Ответ советника сохранён.",
+  };
+
+  return (
+    <>
+      {stage7Error && <div className="rounded-3xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">{errors[stage7Error] ?? stage7Error}</div>}
+      {stage7Saved && <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">{saved[stage7Saved] ?? "Stage 7 действие выполнено."}</div>}
+    </>
+  );
+}
+
 function RecommendationActionFields({ recommendation }: { recommendation: PortfolioData["recommendations"][number] }) {
   return (
     <>
@@ -2799,6 +2955,9 @@ function RecommendationActionFields({ recommendation }: { recommendation: Portfo
       <input name="priority" type="hidden" value={recommendation.priority} />
       <input name="recommendation_type" type="hidden" value={recommendation.recommendation_type} />
       <input name="confidence" type="hidden" value={recommendation.confidence?.toString() ?? ""} />
+      <input name="metrics" type="hidden" value={JSON.stringify(recommendation.metrics ?? {})} />
+      <input name="href" type="hidden" value={recommendation.href ?? ""} />
+      <input name="linked_asset_id" type="hidden" value={recommendation.linkedAssetId ?? ""} />
     </>
   );
 }
@@ -2808,6 +2967,7 @@ function RecommendationsView({ data, filters }: { data: PortfolioData; filters: 
   const canEdit = canEditFamilyData(data.family?.role);
   const assetById = new Map(data.assets.map((asset) => [asset.id, asset]));
   const accountById = new Map(data.accounts.map((account) => [account.id, account]));
+  const explanationByRecommendationId = latestRecommendationExplanationById(data.llmAnalyses);
   const accountLinksByRecommendationId = data.recommendationLinks
     .filter((link) => link.entity_table === "accounts")
     .reduce((groups, link) => {
@@ -2892,6 +3052,10 @@ function RecommendationsView({ data, filters }: { data: PortfolioData; filters: 
             .filter((account): account is NonNullable<typeof account> => Boolean(account));
           const isRead = readIds.has(recommendation.id);
           const whatIfHref = recommendationWhatIfHref(recommendation, data);
+          const explanation = explanationByRecommendationId.get(recommendation.id);
+          const explanationWhatIfHref = explanation ? buildAdvisorWhatIfHref({ analysis: explanation, data, sourceRecommendationId: recommendation.id }) : null;
+          const explanationCitations = Array.isArray(explanation?.citations) ? explanation.citations.slice(0, 3) : [];
+          const explanationLimitations = Array.isArray(explanation?.limitations) ? explanation.limitations.slice(0, 2) : [];
 
           return (
           <article className="rounded-3xl border border-border bg-surface p-6" data-testid="recommendation-card" key={recommendation.id}>
@@ -2935,6 +3099,47 @@ function RecommendationsView({ data, filters }: { data: PortfolioData; filters: 
               </div>
             )}
             <RecommendationMetrics metrics={recommendation.metrics} />
+            {explanation && (
+              <div className="mt-4 rounded-2xl border border-border bg-background p-4" data-testid="recommendation-explanation">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-medium">Объяснение советника</p>
+                  <span className={`rounded-full px-3 py-1 text-xs ${explanation.status === "ready" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                    {explanation.model ?? "model"} · {explanation.impact_level} · {explanation.confidence === null ? "—" : formatPercent(Number(explanation.confidence))}
+                  </span>
+                </div>
+                {explanation.summary && <p className="mt-3 text-sm leading-6">{explanation.summary}</p>}
+                {explanationCitations.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {explanationCitations.map((citation, index) => {
+                      const citationValue = citation as { title?: unknown; url?: unknown };
+                      const title = String(citationValue.title ?? "Источник");
+                      const url = typeof citationValue.url === "string" ? citationValue.url : null;
+                      return url ? (
+                        <Link className="rounded-2xl border border-border bg-surface px-3 py-2 text-xs font-medium" href={url} key={index}>
+                          {title}
+                        </Link>
+                      ) : (
+                        <span className="rounded-2xl border border-border bg-surface px-3 py-2 text-xs font-medium" key={index}>{title}</span>
+                      );
+                    })}
+                  </div>
+                )}
+                {explanationLimitations.length > 0 && (
+                  <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-muted">
+                    {explanationLimitations.map((limitation, index) => (
+                      <li key={index}>{String(limitation)}</li>
+                    ))}
+                  </ul>
+                )}
+                {explanationWhatIfHref && (
+                  <div className="mt-4">
+                    <Link className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" data-testid="recommendation-explanation-what-if-link" href={explanationWhatIfHref}>
+                      What-if
+                    </Link>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="mt-5 flex flex-wrap gap-2">
               <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" data-testid="recommendation-source-link" href={recommendation.href ?? "/dashboard"}>
@@ -2946,6 +3151,15 @@ function RecommendationsView({ data, filters }: { data: PortfolioData; filters: 
                   <RecommendationActionFields recommendation={recommendation} />
                   <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" data-testid="recommendation-read-button" type="submit">
                     В watchlist
+                  </button>
+                </form>
+              )}
+              {canEdit && (
+                <form action={explainRecommendation}>
+                  <input name="return_to" type="hidden" value="/recommendations" />
+                  <RecommendationActionFields recommendation={recommendation} />
+                  <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" data-testid="recommendation-explain-button" type="submit">
+                    Объяснить
                   </button>
                 </form>
               )}
@@ -3009,6 +3223,20 @@ function RecommendationsView({ data, filters }: { data: PortfolioData; filters: 
 
 function NewsView({ data, filters }: { data: PortfolioData; filters: NewsFilterInput }) {
   const assetById = new Map(data.assets.map((asset) => [asset.id, asset]));
+  const sourceById = new Map(data.newsSources.map((source) => [source.id, source]));
+  const documentLinksByDocumentId = new Map<string, PortfolioData["sourceDocumentLinks"]>();
+  for (const link of data.sourceDocumentLinks.filter((item) => item.status !== "rejected")) {
+    const links = documentLinksByDocumentId.get(link.source_document_id) ?? [];
+    links.push(link);
+    documentLinksByDocumentId.set(link.source_document_id, links);
+  }
+  const latestAnalysisByDocumentId = new Map<string, PortfolioData["llmAnalyses"][number]>();
+  for (const analysis of data.llmAnalyses.filter((item) => item.source_document_id)) {
+    const existing = latestAnalysisByDocumentId.get(analysis.source_document_id as string);
+    if (!existing || analysis.created_at > existing.created_at) {
+      latestAnalysisByDocumentId.set(analysis.source_document_id as string, analysis);
+    }
+  }
   const watchlistNewsItems = data.watchlistItems.filter((item) => item.news_item_id);
   const watchlistNewsIds = new Set(watchlistNewsItems.map((item) => item.news_item_id).filter(Boolean));
   const watchlistItemByNewsId = new Map(watchlistNewsItems.map((item) => [item.news_item_id, item]));
@@ -3027,6 +3255,7 @@ function NewsView({ data, filters }: { data: PortfolioData; filters: NewsFilterI
         <MetricCard label="Новости" value={data.newsItems.filter((item) => item.kind !== "idea").length} hint="По портфелю и рынку" />
         <MetricCard label="Идеи" value={data.newsItems.filter((item) => item.kind === "idea").length} hint="Внешний поток" />
         <MetricCard label="В watchlist" value={watchlistNewsIds.size} hint="Сохраненные материалы" />
+        <MetricCard label="Source docs" value={data.sourceDocuments.length} hint="Stage 7 pipeline" />
       </div>
 
       <form className="rounded-3xl border border-border bg-surface p-6" data-testid="news-filters-form">
@@ -3094,6 +3323,224 @@ function NewsView({ data, filters }: { data: PortfolioData; filters: NewsFilterI
           </form>
         </section>
       )}
+
+      {canEdit && (
+        <section className="rounded-3xl border border-border bg-surface p-6" data-testid="source-document-import">
+          <h2 className="text-lg font-semibold">Добавить проверяемый материал</h2>
+          <form action={createManualSourceDocument} className="mt-5 grid gap-3">
+            <input name="return_to" type="hidden" value="/news" />
+            <div className="grid gap-3 md:grid-cols-3">
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Тип документа</span>
+                <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="document_type">
+                  <option value="news">Новость</option>
+                  <option value="issuer_disclosure">Раскрытие</option>
+                  <option value="dividend">Дивиденды</option>
+                  <option value="regulatory">Регуляторное сообщение</option>
+                </select>
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Дата публикации</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="published_at" type="datetime-local" />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Внешний ID</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="external_id" placeholder="опционально" />
+              </label>
+            </div>
+            <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="title" placeholder="Заголовок материала" required />
+            <textarea className="min-h-24 rounded-2xl border border-border bg-background px-4 py-3 text-sm" name="raw_excerpt" placeholder="Короткий фрагмент или текст, который разрешено хранить" />
+            <div className="grid gap-3 md:grid-cols-4">
+              <label className="grid gap-2 text-sm md:col-span-2">
+                <span className="font-medium">URL источника</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="url" placeholder="https://..." />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Тикер</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="ticker" placeholder="SBER" />
+              </label>
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">ISIN</span>
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="isin" placeholder="RU000..." />
+              </label>
+            </div>
+            <label className="grid gap-2 text-sm">
+              <span className="font-medium">Эмитент</span>
+              <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="issuer_name" placeholder="Название эмитента или компании" />
+            </label>
+            <button className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white" type="submit">
+              Сохранить source document
+            </button>
+          </form>
+        </section>
+      )}
+
+      <section className="space-y-4" data-testid="source-documents-section">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Проверяемые материалы</h2>
+            <p className="mt-1 text-sm text-muted">Нормализованные документы для linking и будущего LLM-анализа.</p>
+          </div>
+          {canEdit && (
+            <div className="flex flex-wrap gap-2">
+              <form action={ingestCbrRss}>
+                <input name="return_to" type="hidden" value="/news" />
+                <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" type="submit">
+                  Загрузить CBR RSS
+                </button>
+              </form>
+              <form action={syncMoexIssuerAliases}>
+                <input name="return_to" type="hidden" value="/news" />
+                <button className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" type="submit">
+                  Обновить MOEX aliases
+                </button>
+              </form>
+            </div>
+          )}
+        </div>
+        <div className="grid gap-4 xl:grid-cols-2">
+          {data.sourceDocuments.map((document) => {
+            const source = sourceById.get(document.source_id);
+            const links = documentLinksByDocumentId.get(document.id) ?? [];
+            const analysis = latestAnalysisByDocumentId.get(document.id);
+            const analysisWhatIfHref = analysis ? buildAdvisorWhatIfHref({ analysis, data }) : null;
+            const analysisFacts = Array.isArray(analysis?.facts) ? analysis.facts.slice(0, 3) : [];
+            const analysisLimitations = Array.isArray(analysis?.limitations) ? analysis.limitations.slice(0, 3) : [];
+            const analysisCitations = Array.isArray(analysis?.citations) ? analysis.citations.slice(0, 3) : [];
+
+            return (
+              <article className="rounded-3xl border border-border bg-surface p-6" data-testid="source-document-card" key={document.id}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">{source?.source_name ?? document.trust_level}</span>
+                  <span className="text-xs text-muted">{formatDateTime(document.published_at ?? document.created_at)}</span>
+                </div>
+                <h3 className="mt-4 text-lg font-semibold">{document.title}</h3>
+                <p className="mt-2 text-sm text-muted">
+                  {document.document_type}
+                  {document.ticker ? ` · ${document.ticker}` : ""}
+                  {document.isin ? ` · ${document.isin}` : ""}
+                </p>
+                {document.raw_excerpt && <p className="mt-4 text-sm leading-6">{document.raw_excerpt}</p>}
+                {links.length > 0 && (
+                  <div className="mt-4 rounded-2xl border border-border bg-background p-4">
+                    <p className="text-sm font-medium">Связанные активы</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {links.map((link) => {
+                        const asset = assetById.get(link.asset_id);
+                        return (
+                          <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border bg-surface px-3 py-2 text-xs" key={link.id}>
+                            <Link className="font-medium" href={`/assets?asset_id=${link.asset_id}`}>
+                              {asset?.ticker ?? asset?.name ?? "Актив"} · {formatPercent(Number(link.confidence))}
+                            </Link>
+                            <span className={`rounded-full px-2 py-1 ${link.status === "confirmed" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                              {link.status === "confirmed" ? "confirmed" : "suggested"}
+                            </span>
+                            {canEdit && link.status !== "confirmed" && (
+                              <form action={updateSourceDocumentLinkStatus}>
+                                <input name="return_to" type="hidden" value="/news" />
+                                <input name="source_document_link_id" type="hidden" value={link.id} />
+                                <input name="status" type="hidden" value="confirmed" />
+                                <button className="rounded-full bg-accent px-3 py-1 font-medium text-white" type="submit">
+                                  Подтвердить
+                                </button>
+                              </form>
+                            )}
+                            {canEdit && (
+                              <form action={updateSourceDocumentLinkStatus}>
+                                <input name="return_to" type="hidden" value="/news" />
+                                <input name="source_document_link_id" type="hidden" value={link.id} />
+                                <input name="status" type="hidden" value="rejected" />
+                                <button className="rounded-full border border-border bg-background px-3 py-1 font-medium text-muted" type="submit">
+                                  Отклонить
+                                </button>
+                              </form>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {analysis && (
+                  <div className="mt-4 rounded-2xl border border-border bg-background p-4" data-testid="source-document-analysis">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-medium">LLM-анализ</p>
+                      <span className={`rounded-full px-3 py-1 text-xs ${analysis.status === "ready" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                        {analysis.model ?? "model"} · {analysis.impact_level} · {analysis.confidence === null ? "—" : formatPercent(Number(analysis.confidence))}
+                      </span>
+                    </div>
+                    {analysis.summary && <p className="mt-3 text-sm leading-6">{analysis.summary}</p>}
+                    {analysisFacts.length > 0 && (
+                      <div className="mt-3">
+                        <p className="text-xs font-medium text-muted">Facts</p>
+                        <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
+                          {analysisFacts.map((fact, index) => (
+                            <li key={index}>{String((fact as { text?: unknown }).text ?? fact)}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {analysisLimitations.length > 0 && (
+                      <div className="mt-3">
+                        <p className="text-xs font-medium text-muted">Limitations</p>
+                        <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted">
+                          {analysisLimitations.map((limitation, index) => (
+                            <li key={index}>{String(limitation)}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {analysisCitations.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {analysisCitations.map((citation, index) => {
+                          const citationValue = citation as { title?: unknown; url?: unknown };
+                          const title = String(citationValue.title ?? "Источник");
+                          const url = typeof citationValue.url === "string" ? citationValue.url : null;
+                          return url ? (
+                            <Link className="rounded-2xl border border-border bg-surface px-3 py-2 text-xs font-medium" href={url} key={index}>
+                              {title}
+                            </Link>
+                          ) : (
+                            <span className="rounded-2xl border border-border bg-surface px-3 py-2 text-xs font-medium" key={index}>{title}</span>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {analysisWhatIfHref && (
+                      <div className="mt-4">
+                        <Link className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" data-testid="source-document-analysis-what-if-link" href={analysisWhatIfHref}>
+                          What-if
+                        </Link>
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div className="mt-5 flex flex-wrap gap-2">
+                  {canEdit && (
+                    <form action={analyzeSourceDocument}>
+                      <input name="return_to" type="hidden" value="/news" />
+                      <input name="source_document_id" type="hidden" value={document.id} />
+                      <button className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" type="submit">
+                        Анализировать
+                      </button>
+                    </form>
+                  )}
+                  {document.url && (
+                    <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" href={document.url}>
+                      Источник
+                    </Link>
+                  )}
+                  <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" href={`/advisor?source_document_id=${encodeURIComponent(document.id)}`}>
+                    В советник
+                  </Link>
+                  {links.length === 0 && <span className="rounded-2xl border border-border bg-background px-4 py-2 text-sm text-muted">Связи пока не найдены</span>}
+                </div>
+              </article>
+            );
+          })}
+          {data.sourceDocuments.length === 0 && <EmptyState text="Проверяемых материалов пока нет. Добавьте ручной материал, чтобы проверить linking stage 7." />}
+        </div>
+      </section>
 
       <section className="grid gap-4 xl:grid-cols-2">
         {newsItems.map((newsItem) => (
@@ -3782,6 +4229,216 @@ function WhatIfView({ data, input }: { data: PortfolioData; input: WhatIfFormInp
   );
 }
 
+function advisorThreadSourceDocumentId(thread: PortfolioData["advisorThreads"][number] | null) {
+  const scope = thread?.context_scope;
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) return null;
+  const value = (scope as { source_document_id?: unknown }).source_document_id;
+  return typeof value === "string" ? value : null;
+}
+
+function advisorEntityHref(entity: { entity_type?: unknown; entity_id?: unknown }) {
+  const entityType = String(entity.entity_type ?? "");
+  const entityId = String(entity.entity_id ?? "");
+  if (!entityId) return null;
+  if (entityType === "asset") return `/assets?asset_id=${encodeURIComponent(entityId)}`;
+  if (entityType === "recommendation") return "/recommendations";
+  if (entityType === "source_document") return "/news";
+  return null;
+}
+
+function AdvisorMessageLinks({
+  citations,
+  linkedEntities,
+}: {
+  citations: unknown[];
+  linkedEntities: unknown[];
+}) {
+  const citationItems = citations
+    .map((item) => item && typeof item === "object" ? item as { title?: unknown; url?: unknown } : null)
+    .filter((item): item is { title?: unknown; url?: unknown } => Boolean(item));
+  const entityItems = linkedEntities
+    .map((item) => item && typeof item === "object" ? item as { entity_type?: unknown; entity_id?: unknown; label?: unknown } : null)
+    .filter((item): item is { entity_type?: unknown; entity_id?: unknown; label?: unknown } => Boolean(item));
+
+  if (citationItems.length === 0 && entityItems.length === 0) return null;
+
+  return (
+    <div className="mt-3 flex flex-wrap gap-2">
+      {entityItems.map((entity, index) => {
+        const href = advisorEntityHref(entity);
+        const label = String(entity.label ?? entity.entity_type ?? "Entity");
+        return href ? (
+          <Link className="rounded-2xl border border-border bg-background px-3 py-2 text-xs font-medium" href={href} key={`entity-${index}`}>
+            {label}
+          </Link>
+        ) : (
+          <span className="rounded-2xl border border-border bg-background px-3 py-2 text-xs font-medium" key={`entity-${index}`}>{label}</span>
+        );
+      })}
+      {citationItems.map((citation, index) => {
+        const title = String(citation.title ?? "Источник");
+        const url = typeof citation.url === "string" ? citation.url : null;
+        return url ? (
+          <Link className="rounded-2xl border border-border bg-background px-3 py-2 text-xs font-medium text-muted" href={url} key={`citation-${index}`}>
+            {title}
+          </Link>
+        ) : (
+          <span className="rounded-2xl border border-border bg-background px-3 py-2 text-xs font-medium text-muted" key={`citation-${index}`}>{title}</span>
+        );
+      })}
+    </div>
+  );
+}
+
+function AdvisorView({
+  data,
+  sourceDocumentId,
+  threadId,
+}: {
+  data: PortfolioData;
+  sourceDocumentId?: string;
+  threadId?: string;
+}) {
+  const selectedThread = (threadId ? data.advisorThreads.find((thread) => thread.id === threadId) : null) ?? data.advisorThreads[0] ?? null;
+  const selectedThreadId = selectedThread?.id ?? null;
+  const selectedSourceDocumentId = sourceDocumentId && data.sourceDocuments.some((document) => document.id === sourceDocumentId)
+    ? sourceDocumentId
+    : advisorThreadSourceDocumentId(selectedThread) ?? "";
+  const selectedSourceDocument = selectedSourceDocumentId
+    ? data.sourceDocuments.find((document) => document.id === selectedSourceDocumentId) ?? null
+    : null;
+  const messages = selectedThreadId
+    ? data.advisorMessages.filter((message) => message.thread_id === selectedThreadId)
+    : [];
+
+  return (
+    <div className="grid gap-6 xl:grid-cols-[320px_1fr]" data-testid="advisor-view">
+      <aside className="space-y-4">
+        <section className="rounded-3xl border border-border bg-surface p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="font-semibold">Диалоги</h2>
+            <Link className="rounded-2xl border border-border bg-background px-3 py-2 text-xs font-medium" href="/advisor">
+              Новый
+            </Link>
+          </div>
+          <div className="mt-4 grid gap-2">
+            {data.advisorThreads.map((thread) => (
+              <Link
+                className={`rounded-2xl border px-3 py-3 text-sm ${thread.id === selectedThreadId ? "border-accent bg-background font-medium" : "border-border text-muted"}`}
+                href={`/advisor?advisor_thread_id=${encodeURIComponent(thread.id)}`}
+                key={thread.id}
+              >
+                <span className="block truncate">{thread.title}</span>
+                <span className="mt-1 block text-xs text-muted">{formatDateTime(thread.updated_at)}</span>
+              </Link>
+            ))}
+            {data.advisorThreads.length === 0 && (
+              <div className="rounded-2xl border border-dashed border-border bg-background p-4 text-sm text-muted">
+                <p className="font-medium text-foreground">Истории пока нет</p>
+                <p className="mt-1">Первый вопрос создаст новый диалог, а ответ сохранится здесь.</p>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-3xl border border-border bg-surface p-5">
+          <h2 className="font-semibold">Материалы</h2>
+          <p className="mt-1 text-sm text-muted">Можно выбрать source document для разбора новости или disclosure.</p>
+          <div className="mt-4 grid gap-2">
+            {data.sourceDocuments.slice(0, 6).map((document) => (
+              <Link
+                className={`rounded-2xl border px-3 py-3 text-sm ${document.id === selectedSourceDocumentId ? "border-accent bg-background font-medium" : "border-border text-muted"}`}
+                href={`/advisor?source_document_id=${encodeURIComponent(document.id)}${selectedThreadId ? `&advisor_thread_id=${encodeURIComponent(selectedThreadId)}` : ""}`}
+                key={document.id}
+              >
+                <span className="block line-clamp-2">{document.title}</span>
+                <span className="mt-1 block text-xs text-muted">{formatDateTime(document.published_at ?? document.created_at)}</span>
+              </Link>
+            ))}
+            {data.sourceDocuments.length === 0 && (
+              <div className="rounded-2xl border border-dashed border-border bg-background p-4 text-sm text-muted">
+                <p className="font-medium text-foreground">Материалов пока нет</p>
+                <p className="mt-1">Советник всё равно ответит по портфелю, рекомендациям и сохранённым анализам.</p>
+              </div>
+            )}
+          </div>
+        </section>
+      </aside>
+
+      <section className="space-y-4 rounded-3xl border border-border bg-surface p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-semibold">{selectedThread?.title ?? "Новый диалог"}</h2>
+            <p className="mt-1 text-sm text-muted">
+              Контекст: {selectedSourceDocument ? selectedSourceDocument.title : "снимок портфеля, рекомендации и последние LLM-анализы"}
+            </p>
+          </div>
+          <span className="rounded-full bg-background px-3 py-1 text-xs text-muted">history limit: 8 messages</span>
+        </div>
+
+        <div aria-live="polite" className="grid gap-3" data-testid="advisor-messages">
+          {messages.map((message) => {
+            const isAssistant = message.role === "assistant";
+            return (
+              <article className={`rounded-2xl border p-4 ${isAssistant ? "border-border bg-background" : "border-accent/30 bg-accent/5"}`} key={message.id}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs font-medium text-muted">{isAssistant ? "Советник" : "Вы"} · {formatDateTime(message.created_at)}</p>
+                  {isAssistant && (
+                    <span className="rounded-full bg-surface px-3 py-1 text-xs text-muted">
+                      {message.model ?? "model"} · {message.prompt_version ?? "prompt"}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-3 whitespace-pre-wrap text-sm leading-6">{message.content}</p>
+                {isAssistant && <AdvisorMessageLinks citations={message.citations} linkedEntities={message.linked_entities} />}
+                {isAssistant && message.safety_flags.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {message.safety_flags.map((flag) => (
+                      <span className="rounded-full bg-amber-50 px-3 py-1 text-xs text-amber-700" key={String(flag)}>{String(flag)}</span>
+                    ))}
+                  </div>
+                )}
+              </article>
+            );
+          })}
+          {messages.length === 0 && (
+            <div className="rounded-2xl border border-dashed border-border bg-background p-6">
+              <p className="text-sm font-medium">Диалог готов к первому вопросу</p>
+              <p className="mt-2 text-sm leading-6 text-muted">
+                Можно спросить про структуру портфеля, свежие source documents, rule-based рекомендации или попросить подготовить what-if prefill.
+              </p>
+            </div>
+          )}
+        </div>
+
+        <form action={askAdvisor} className="rounded-2xl border border-border bg-background p-4" data-testid="advisor-question-form">
+          <input name="return_to" type="hidden" value="/advisor" />
+          {selectedThreadId && <input name="advisor_thread_id" type="hidden" value={selectedThreadId} />}
+          <div className="grid gap-3 lg:grid-cols-[1fr_260px_auto]">
+            <label className="grid gap-2 text-sm">
+              <span className="font-medium">Вопрос</span>
+              <textarea className="min-h-28 rounded-2xl border border-border bg-surface px-4 py-3 text-sm" maxLength={4000} name="question" placeholder="Что сейчас важнее проверить в портфеле?" required />
+            </label>
+            <label className="grid gap-2 text-sm">
+              <span className="font-medium">Материал</span>
+              <select className="h-11 rounded-2xl border border-border bg-surface px-4 text-sm" defaultValue={selectedSourceDocumentId} name="source_document_id">
+                <option value="">Без материала</option>
+                {data.sourceDocuments.slice(0, 30).map((document) => (
+                  <option key={document.id} value={document.id}>{document.title}</option>
+                ))}
+              </select>
+            </label>
+            <div className="flex items-end">
+              <AdvisorSubmitButton />
+            </div>
+          </div>
+          <p className="mt-3 text-xs text-muted">Ответ справочный, с ограничениями и ссылками на сущности приложения. Сырые prompts и секреты не сохраняются в audit.</p>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function PlaceholderView({ section }: { section: string }) {
   const details: Record<string, string> = {
     recommendations: "Таблица рекомендаций уже создана. Интерфейс добавим после первого слоя операций и позиций.",
@@ -3804,6 +4461,8 @@ function SectionContent({
   priceError,
   positionFilters,
   recommendationFilters,
+  advisorThreadId,
+  advisorSourceDocumentId,
   newsFilters,
   watchlistFilters,
   whatIfInput,
@@ -3822,6 +4481,8 @@ function SectionContent({
   settingsSaved,
   stage5Error,
   stage5Saved,
+  stage7Error,
+  stage7Saved,
   uploaded,
 }: {
   applied?: string;
@@ -3835,6 +4496,8 @@ function SectionContent({
   priceError?: string;
   positionFilters: PositionFilterInput;
   recommendationFilters: RecommendationFilterInput;
+  advisorThreadId?: string;
+  advisorSourceDocumentId?: string;
   newsFilters: NewsFilterInput;
   watchlistFilters: WatchlistFilterInput;
   whatIfInput: WhatIfFormInput;
@@ -3853,11 +4516,21 @@ function SectionContent({
   settingsSaved?: string;
   stage5Error?: string;
   stage5Saved?: string;
+  stage7Error?: string;
+  stage7Saved?: string;
   uploaded?: string;
 }) {
   if (!data.family) return <EmptyState text="Для пользователя пока не назначена семья. Нужно добавить запись в family_members." />;
 
   if (section === "dashboard") return <DashboardView dashboardPeriod={dashboardPeriod} data={data} />;
+  if (section === "advisor") {
+    return (
+      <div className="space-y-6">
+        <Stage7Notice stage7Error={stage7Error} stage7Saved={stage7Saved} />
+        <AdvisorView data={data} sourceDocumentId={advisorSourceDocumentId} threadId={advisorThreadId} />
+      </div>
+    );
+  }
   if (section === "what-if") return <WhatIfView data={data} input={whatIfInput} />;
   if (section === "accounts") return <AccountsView data={data} operationCancelled={operationCancelled} operationError={operationError} operationSaved={operationSaved} selectedAccountId={selectedAccountId} />;
   if (section === "assets") return <AssetsView data={data} operationCancelled={operationCancelled} operationError={operationError} operationSaved={operationSaved} positionFilters={positionFilters} priceError={priceError} priced={priced} selectedAssetId={selectedAssetId} />;
@@ -3891,6 +4564,7 @@ function SectionContent({
     return (
       <div className="space-y-6">
         <Stage5Notice stage5Error={stage5Error} stage5Saved={stage5Saved} />
+        <Stage7Notice stage7Error={stage7Error} stage7Saved={stage7Saved} />
         <RecommendationsView data={data} filters={recommendationFilters} />
       </div>
     );
@@ -3899,6 +4573,7 @@ function SectionContent({
     return (
       <div className="space-y-6">
         <Stage5Notice stage5Error={stage5Error} stage5Saved={stage5Saved} />
+        <Stage7Notice stage7Error={stage7Error} stage7Saved={stage7Saved} />
         <NewsView data={data} filters={newsFilters} />
       </div>
     );
@@ -3997,6 +4672,8 @@ export default async function SectionPage({
           priced={queryValue(query.priced)}
           positionFilters={positionFilters}
           recommendationFilters={recommendationFilters}
+          advisorThreadId={queryValue(query.advisor_thread_id)}
+          advisorSourceDocumentId={queryValue(query.source_document_id)}
           newsFilters={newsFilters}
           watchlistFilters={watchlistFilters}
           whatIfInput={whatIfInput}
@@ -4013,6 +4690,8 @@ export default async function SectionPage({
           settingsSaved={queryValue(query.settings_saved)}
           stage5Error={queryValue(query.stage5_error)}
           stage5Saved={queryValue(query.stage5_saved)}
+          stage7Error={queryValue(query.stage7_error)}
+          stage7Saved={queryValue(query.stage7_saved)}
           uploaded={queryValue(query.uploaded)}
         />
       </div>

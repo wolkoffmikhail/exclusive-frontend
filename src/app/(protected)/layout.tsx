@@ -13,6 +13,7 @@ const navigation = [
   ["recommendations", "Рекомендации"],
   ["what-if", "What-if"],
   ["news", "Новости"],
+  ["advisor", "Советник"],
   ["watchlist", "Watchlist"],
   ["events", "События"],
   ["settings", "Настройки"],

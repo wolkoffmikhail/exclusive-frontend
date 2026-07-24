@@ -1,6 +1,7 @@
 import * as XLSX from "xlsx";
 import { buildPortfolioAnalytics, type PeriodKey, type PortfolioAnalytics } from "./analytics";
 import type { PortfolioData } from "./data";
+import { buildReportLlmSummaryRows } from "./report-summary";
 import type { WhatIfScenarioResult } from "./scenarios";
 
 export type PortfolioExportFormat = "excel" | "pdf-html";
@@ -10,6 +11,7 @@ export type PortfolioExportScope = {
   portfolioId?: string | null;
   accountId?: string | null;
   includeScenario?: boolean;
+  includeLlmSummary?: boolean;
 };
 
 export type ExportSheet = {
@@ -278,6 +280,7 @@ export function buildPortfolioExportViewModel({
         { "Ключ": "Период потоков", "Значение": period },
         { "Ключ": "Базовая валюта", "Значение": baseCurrency },
         { "Ключ": "What-if включен", "Значение": scenario?.ok ? "да" : "нет" },
+        { "Ключ": "LLM-summary включен", "Значение": scope.includeLlmSummary ? "да" : "нет" },
       ],
     },
   ];
@@ -286,6 +289,13 @@ export function buildPortfolioExportViewModel({
     sheets.splice(5, 0, {
       name: "Scenario",
       rows: scenarioRows(scenario),
+    });
+  }
+
+  if (scope.includeLlmSummary) {
+    sheets.splice(sheets.findIndex((sheet) => sheet.name === "Warnings"), 0, {
+      name: "LLM Summary",
+      rows: buildReportLlmSummaryRows({ data, scope }),
     });
   }
 
@@ -352,6 +362,7 @@ export function buildPortfolioReportHtml(viewModel: PortfolioExportViewModel) {
   const cashflows = viewModel.sheets.find((sheet) => sheet.name === "Cashflows");
   const recommendations = viewModel.sheets.find((sheet) => sheet.name === "Recommendations");
   const scenario = viewModel.sheets.find((sheet) => sheet.name === "Scenario");
+  const llmSummary = viewModel.sheets.find((sheet) => sheet.name === "LLM Summary");
 
   return `<!doctype html>
 <html lang="ru">
@@ -366,6 +377,7 @@ export function buildPortfolioReportHtml(viewModel: PortfolioExportViewModel) {
     table { border-collapse: collapse; font-size: 12px; margin-top: 12px; width: 100%; }
     th, td { border: 1px solid #d8dfd9; padding: 8px; text-align: left; vertical-align: top; }
     th { background: #eef4ef; }
+    .llm-badge { background: #e6f2ff; border: 1px solid #a6c8ff; border-radius: 999px; color: #134a8e; display: inline-block; font-size: 11px; margin-left: 8px; padding: 3px 8px; vertical-align: middle; }
     .warning { background: #fff8e5; border: 1px solid #ecd79a; margin: 8px 0; padding: 10px; }
     @media print { body { margin: 20mm; } }
   </style>
@@ -382,6 +394,7 @@ export function buildPortfolioReportHtml(viewModel: PortfolioExportViewModel) {
   ${cashflows ? htmlTable(cashflows) : "<p>Нет данных.</p>"}
   <h2>Recommendations</h2>
   ${recommendations ? htmlTable(recommendations) : "<p>Нет данных.</p>"}
+  ${llmSummary ? `<h2>LLM Summary <span class="llm-badge">LLM-generated</span></h2><p>This section is generated from stored portfolio context and saved LLM analyses. Review citations and limitations before using it externally.</p>${htmlTable(llmSummary, 20)}` : ""}
   ${scenario ? `<h2>What-if</h2>${htmlTable(scenario)}` : ""}
 </body>
 </html>`;

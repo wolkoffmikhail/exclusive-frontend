@@ -284,6 +284,115 @@ export type NotificationDelivery = {
   created_at: string;
 };
 
+export type NewsSource = {
+  id: string;
+  family_id: string;
+  source_code: string;
+  source_name: string;
+  source_type: string;
+  base_url: string | null;
+  status: "active" | "paused" | "failed" | string;
+  requires_token: boolean;
+  terms_status: "unchecked" | "approved" | "restricted" | "blocked" | string;
+  terms_checked_at: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SourceDocument = {
+  id: string;
+  family_id: string;
+  source_id: string;
+  external_id: string | null;
+  url: string | null;
+  title: string;
+  published_at: string | null;
+  issuer_name: string | null;
+  ticker: string | null;
+  isin: string | null;
+  language: string;
+  document_type: string;
+  trust_level: "primary" | "reference" | "editorial" | "manual" | string;
+  raw_excerpt: string | null;
+  content_hash: string | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SourceDocumentLink = {
+  id: string;
+  family_id: string;
+  source_document_id: string;
+  asset_id: string;
+  link_type: "ticker" | "isin" | "issuer_alias" | "manual" | "llm_suggested" | string;
+  confidence: number | string;
+  status: "suggested" | "confirmed" | "rejected" | string;
+  evidence: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type LlmAnalysis = {
+  id: string;
+  family_id: string;
+  source_document_id: string | null;
+  analysis_type: "summary" | "portfolio_impact" | "recommendation_explanation" | "report_summary" | string;
+  model: string | null;
+  prompt_version: string;
+  status: "pending" | "ready" | "failed" | string;
+  summary: string | null;
+  facts: unknown[];
+  portfolio_links: unknown[];
+  impact_level: "none" | "low" | "medium" | "high" | "unknown" | string;
+  confidence: number | string | null;
+  limitations: unknown[];
+  citations: unknown[];
+  suggested_actions: unknown[];
+  what_if_prefill: Record<string, string> | null;
+  safety_flags: unknown[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type AdvisorThread = {
+  id: string;
+  family_id: string;
+  created_by: string;
+  title: string;
+  context_scope: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AdvisorMessage = {
+  id: string;
+  family_id: string;
+  thread_id: string;
+  role: "user" | "assistant" | "system" | string;
+  content: string;
+  citations: unknown[];
+  linked_entities: unknown[];
+  model: string | null;
+  prompt_version: string | null;
+  safety_flags: unknown[];
+  created_at: string;
+};
+
+export type IssuerAlias = {
+  id: string;
+  family_id: string;
+  asset_id: string;
+  alias: string;
+  source: "manual" | "moex" | "import" | "llm_suggested" | string;
+  confidence: number | string;
+  status: "active" | "rejected" | string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type PortfolioData = {
   family: ActiveFamily | null;
   portfolios: Portfolio[];
@@ -308,6 +417,13 @@ export type PortfolioData = {
   systemAlerts: SystemAlert[];
   notificationPreferences: NotificationPreference[];
   notificationDeliveries: NotificationDelivery[];
+  newsSources: NewsSource[];
+  sourceDocuments: SourceDocument[];
+  sourceDocumentLinks: SourceDocumentLink[];
+  llmAnalyses: LlmAnalysis[];
+  advisorThreads: AdvisorThread[];
+  advisorMessages: AdvisorMessage[];
+  issuerAliases: IssuerAlias[];
 };
 
 type FamilyMemberRow = {
@@ -381,6 +497,13 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       systemAlerts: [],
       notificationPreferences: [],
       notificationDeliveries: [],
+      newsSources: [],
+      sourceDocuments: [],
+      sourceDocumentLinks: [],
+      llmAnalyses: [],
+      advisorThreads: [],
+      advisorMessages: [],
+      issuerAliases: [],
     };
   }
 
@@ -403,6 +526,13 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
     systemAlerts,
     notificationPreferences,
     notificationDeliveries,
+    newsSources,
+    sourceDocuments,
+    sourceDocumentLinks,
+    llmAnalyses,
+    advisorThreads,
+    advisorMessages,
+    issuerAliases,
   ] = await Promise.all([
     supabase
       .from("portfolios")
@@ -510,6 +640,46 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       .eq("family_id", family.id)
       .order("created_at", { ascending: false })
       .limit(20),
+    supabase
+      .from("news_sources")
+      .select("id, family_id, source_code, source_name, source_type, base_url, status, requires_token, terms_status, terms_checked_at, last_success_at, last_error, created_at, updated_at")
+      .eq("family_id", family.id)
+      .order("source_name", { ascending: true }),
+    supabase
+      .from("source_documents")
+      .select("id, family_id, source_id, external_id, url, title, published_at, issuer_name, ticker, isin, language, document_type, trust_level, raw_excerpt, content_hash, payload, created_at, updated_at")
+      .eq("family_id", family.id)
+      .order("published_at", { ascending: false, nullsFirst: false })
+      .limit(100),
+    supabase
+      .from("source_document_links")
+      .select("id, family_id, source_document_id, asset_id, link_type, confidence, status, evidence, created_at, updated_at")
+      .eq("family_id", family.id)
+      .limit(300),
+    supabase
+      .from("llm_analyses")
+      .select("id, family_id, source_document_id, analysis_type, model, prompt_version, status, summary, facts, portfolio_links, impact_level, confidence, limitations, citations, suggested_actions, what_if_prefill, safety_flags, created_at, updated_at")
+      .eq("family_id", family.id)
+      .order("created_at", { ascending: false })
+      .limit(100),
+    supabase
+      .from("advisor_threads")
+      .select("id, family_id, created_by, title, context_scope, created_at, updated_at")
+      .eq("family_id", family.id)
+      .order("updated_at", { ascending: false })
+      .limit(20),
+    supabase
+      .from("advisor_messages")
+      .select("id, family_id, thread_id, role, content, citations, linked_entities, model, prompt_version, safety_flags, created_at")
+      .eq("family_id", family.id)
+      .order("created_at", { ascending: true })
+      .limit(200),
+    supabase
+      .from("issuer_aliases")
+      .select("id, family_id, asset_id, alias, source, confidence, status, created_at, updated_at")
+      .eq("family_id", family.id)
+      .eq("status", "active")
+      .order("alias", { ascending: true }),
   ]);
 
   const operationRows = rows<Operation>(operations.data);
@@ -588,5 +758,12 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       settings: sanitizeNotificationSettings(preference.settings),
     })),
     notificationDeliveries: rows<NotificationDelivery>(notificationDeliveries.data),
+    newsSources: rows<NewsSource>(newsSources.data),
+    sourceDocuments: rows<SourceDocument>(sourceDocuments.data),
+    sourceDocumentLinks: rows<SourceDocumentLink>(sourceDocumentLinks.data),
+    llmAnalyses: rows<LlmAnalysis>(llmAnalyses.data),
+    advisorThreads: rows<AdvisorThread>(advisorThreads.data),
+    advisorMessages: rows<AdvisorMessage>(advisorMessages.data),
+    issuerAliases: rows<IssuerAlias>(issuerAliases.data),
   };
 }

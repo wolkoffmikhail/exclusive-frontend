@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "check": "npm run lint && npm run typecheck && npm run test -- --pool=threads && npm run build",
     "smoke": "node scripts/smoke.mjs",
     "smoke:prod": "node scripts/smoke.mjs http://192.168.0.22:31010",
     "smoke:browser-demo": "node scripts/browser-demo-smoke.mjs",

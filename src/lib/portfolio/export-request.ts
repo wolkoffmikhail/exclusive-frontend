@@ -21,6 +21,7 @@ export type PortfolioExportAuditPayload = {
   portfolio_id: string | null;
   account_id: string | null;
   include_scenario: boolean;
+  include_llm_summary: boolean;
   scenario_ok: boolean | null;
   scenario_type: "buy" | "sell" | null;
   generated_at: string;
@@ -45,6 +46,7 @@ export function parsePortfolioExportRequest(searchParams: URLSearchParams): Port
       portfolioId: emptyToNull(searchParams.get("portfolio_id")),
       accountId: emptyToNull(searchParams.get("account_id")),
       includeScenario: searchParams.get("include_scenario") === "1",
+      includeLlmSummary: searchParams.get("include_llm_summary") === "1",
     },
   };
 }
@@ -90,6 +92,7 @@ export function buildPortfolioExportAuditPayload({
     portfolio_id: scope.portfolioId ?? null,
     account_id: scope.accountId ?? null,
     include_scenario: Boolean(scope.includeScenario),
+    include_llm_summary: Boolean(scope.includeLlmSummary),
     scenario_ok: scenario?.ok ?? null,
     scenario_type: scenario?.ok ? scenario.input.scenarioType : null,
     generated_at: generatedAt,
@@ -97,4 +100,3 @@ export function buildPortfolioExportAuditPayload({
     warnings_count: warningsCount,
   };
 }
-
