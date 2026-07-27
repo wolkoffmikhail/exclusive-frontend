@@ -572,6 +572,15 @@ async function assertStage6WhatIfAndExport(page) {
   await submitStage8Action(page, draftCard.getByTestId("scenario-draft-archive-button"), ["scenario-draft-archived"]);
   await assertNoVisible(page.getByTestId("scenario-draft-card").filter({ hasText: draftTitle }), "archived scenario should leave active drafts list");
 
+  await assertVisible(page.getByTestId("scenario-draft-filters"), "scenario draft filters should be available");
+  await page.getByTestId("scenario-draft-status-filter").selectOption("archived");
+  await Promise.all([
+    page.waitForURL((url) => url.pathname === "/what-if" && url.searchParams.get("scenario_draft_status") === "archived", { timeout: 30_000 }),
+    page.getByTestId("scenario-draft-apply-filters-button").click(),
+  ]);
+  await page.waitForLoadState("networkidle");
+  await assertVisible(page.getByTestId("scenario-draft-card").filter({ hasText: draftTitle }), "archived filter should show archived scenario draft");
+
   console.log("ok stage 6 what-if/export and stage 8 scenario drafts");
 }
 

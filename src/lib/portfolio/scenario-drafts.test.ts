@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildPortfolioAnalytics } from "./analytics";
-import { buildScenarioDraftInsert, scenarioDraftHref } from "./scenario-drafts";
+import { buildScenarioDraftInsert, filterScenarioDrafts, scenarioDraftHref } from "./scenario-drafts";
+import type { ScenarioDraft } from "./data";
 import type { WhatIfScenarioResult } from "./scenarios";
 
 const beforeAnalytics = buildPortfolioAnalytics({
@@ -63,6 +64,31 @@ const okResult: WhatIfScenarioResult = {
   diagnostics: [],
 };
 
+function draft(overrides: Partial<ScenarioDraft>): ScenarioDraft {
+  return {
+    id: overrides.id ?? "draft-1",
+    family_id: "family-1",
+    owner_user_id: "user-1",
+    title: overrides.title ?? "Draft",
+    status: overrides.status ?? "draft",
+    scenario_type: overrides.scenario_type ?? "buy",
+    account_id: overrides.account_id ?? "account-1",
+    asset_id: overrides.asset_id ?? "asset-1",
+    trade_date: overrides.trade_date ?? "2026-07-27",
+    quantity: overrides.quantity ?? 1,
+    price: overrides.price ?? 10,
+    currency_code: overrides.currency_code ?? "RUB",
+    commission: overrides.commission ?? 0,
+    source_recommendation_id: overrides.source_recommendation_id ?? null,
+    input_payload: overrides.input_payload ?? {},
+    result_snapshot: overrides.result_snapshot ?? {},
+    created_by: overrides.created_by ?? "user-1",
+    updated_by: overrides.updated_by ?? "user-1",
+    created_at: overrides.created_at ?? "2026-07-27T10:00:00.000Z",
+    updated_at: overrides.updated_at ?? "2026-07-27T10:00:00.000Z",
+  };
+}
+
 describe("scenario draft helpers", () => {
   it("builds a normalized draft insert payload", () => {
     const result = buildScenarioDraftInsert({
@@ -116,5 +142,28 @@ describe("scenario draft helpers", () => {
       commission: "0",
       source_recommendation_id: "recommendation-1",
     })).toBe("/what-if?scenario_draft_id=draft-1&scenario_type=sell&account_id=account-1&asset_id=asset-1&trade_date=2026-07-27&quantity=1&price=20&currency_code=RUB&commission=0&source_recommendation_id=recommendation-1");
+  });
+
+  it("filters drafts by default active status", () => {
+    expect(filterScenarioDrafts([
+      draft({ id: "active", status: "draft" }),
+      draft({ id: "archived", status: "archived" }),
+    ], {}).map((item) => item.id)).toEqual(["active"]);
+  });
+
+  it("filters drafts by status, asset and trade date", () => {
+    const drafts = [
+      draft({ id: "match", asset_id: "asset-2", trade_date: "2026-07-15" }),
+      draft({ id: "wrong-asset", asset_id: "asset-1", trade_date: "2026-07-15" }),
+      draft({ id: "too-early", asset_id: "asset-2", trade_date: "2026-07-01" }),
+      draft({ id: "archived-match", asset_id: "asset-2", status: "archived", trade_date: "2026-07-15" }),
+    ];
+
+    expect(filterScenarioDrafts(drafts, {
+      status: "all",
+      assetId: "asset-2",
+      dateFrom: "2026-07-10",
+      dateTo: "2026-07-20",
+    }).map((item) => item.id)).toEqual(["match", "archived-match"]);
   });
 });

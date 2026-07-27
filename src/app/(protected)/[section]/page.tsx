@@ -8,7 +8,7 @@ import { filterPortfolioEvents, splitPortfolioEvents, type EventFilterInput } fr
 import { filterAndSortPositions, groupPositionsByAssetType, type PositionFilterInput } from "@/lib/portfolio/position-filters";
 import { canEditFamilyData, canManageFamily } from "@/lib/portfolio/permissions";
 import { latestRecommendationExplanationById } from "@/lib/portfolio/recommendation-explanations";
-import { scenarioDraftHref } from "@/lib/portfolio/scenario-drafts";
+import { filterScenarioDrafts, normalizeScenarioDraftStatusFilter, scenarioDraftHref, type ScenarioDraftFilterInput } from "@/lib/portfolio/scenario-drafts";
 import { runWhatIfScenario, type ScenarioMetricDelta, type WhatIfScenarioResult } from "@/lib/portfolio/scenarios";
 import { sourceDocumentsForAsset } from "@/lib/portfolio/source-document-filters";
 import { filterWatchlistItems, type WatchlistFilterInput } from "@/lib/portfolio/watchlist";
@@ -4025,10 +4025,14 @@ function ScenarioResultSummary({ result }: { result: SuccessfulWhatIfScenarioRes
   );
 }
 
-function WhatIfView({ data, input }: { data: PortfolioData; input: WhatIfFormInput }) {
+function WhatIfView({ data, filters, input }: { data: PortfolioData; filters: ScenarioDraftFilterInput; input: WhatIfFormInput }) {
   const accounts = data.accounts.filter((account) => account.status === "active");
   const assets = data.assets.filter((asset) => asset.status === "active" && asset.asset_type_code !== "cash");
   const canEdit = canEditFamilyData(data.family?.role);
+  const scenarioDraftStatusFilter = normalizeScenarioDraftStatusFilter(filters.status);
+  const filteredScenarioDrafts = filterScenarioDrafts(data.scenarioDrafts, filters);
+  const activeScenarioDraftCount = data.scenarioDrafts.filter((draft) => draft.status === "draft").length;
+  const scenarioDraftAssetOptions = assets.filter((asset) => data.scenarioDrafts.some((draft) => draft.asset_id === asset.id));
   const defaultAccount = accounts.find((account) => account.id === input.accountId) ?? accounts[0];
   const defaultAsset = assets.find((asset) => asset.id === input.assetId) ?? assets[0];
   const selectedAsset = assets.find((asset) => asset.id === input.assetId) ?? defaultAsset;
@@ -4203,15 +4207,54 @@ function WhatIfView({ data, input }: { data: PortfolioData; input: WhatIfFormInp
             <h2 className="text-lg font-semibold">Saved scenarios</h2>
             <p className="mt-1 text-sm text-muted">Drafts are shared with family viewers and editable by editors/admins.</p>
           </div>
-          <span className="rounded-2xl border border-border bg-background px-3 py-2 text-xs text-muted">{data.scenarioDrafts.length} active</span>
+          <span className="rounded-2xl border border-border bg-background px-3 py-2 text-xs text-muted">{filteredScenarioDrafts.length} of {data.scenarioDrafts.length} shown · {activeScenarioDraftCount} active</span>
         </div>
+        <form action="/what-if" className="mt-5 grid gap-3 md:grid-cols-5" data-testid="scenario-draft-filters">
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">Status</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="scenario-draft-status-filter" defaultValue={scenarioDraftStatusFilter} name="scenario_draft_status">
+              <option value="draft">Active</option>
+              <option value="archived">Archived</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm md:col-span-2">
+            <span className="font-medium">Asset</span>
+            <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="scenario-draft-asset-filter" defaultValue={filters.assetId ?? ""} name="scenario_draft_asset_id">
+              <option value="">All assets</option>
+              {scenarioDraftAssetOptions.map((asset) => (
+                <option key={asset.id} value={asset.id}>{asset.name} · {asset.ticker ?? asset.currency_code ?? "-"}</option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">From</span>
+            <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="scenario-draft-date-from-filter" defaultValue={filters.dateFrom ?? ""} name="scenario_draft_date_from" type="date" />
+          </label>
+          <label className="grid gap-2 text-sm">
+            <span className="font-medium">To</span>
+            <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="scenario-draft-date-to-filter" defaultValue={filters.dateTo ?? ""} name="scenario_draft_date_to" type="date" />
+          </label>
+          <div className="flex flex-wrap items-end gap-2 md:col-span-5">
+            <button className="h-10 rounded-2xl bg-accent px-4 text-sm font-medium text-white" data-testid="scenario-draft-apply-filters-button" type="submit">
+              Apply filters
+            </button>
+            <Link className="h-10 rounded-2xl border border-border px-4 py-2 text-sm font-medium" href="/what-if">
+              Clear
+            </Link>
+          </div>
+        </form>
         {data.scenarioDrafts.length === 0 ? (
           <div className="mt-5">
             <EmptyState text="No saved what-if scenarios yet." />
           </div>
+        ) : filteredScenarioDrafts.length === 0 ? (
+          <div className="mt-5">
+            <EmptyState text="No scenario drafts match these filters." />
+          </div>
         ) : (
           <div className="mt-5 grid gap-3 md:grid-cols-2">
-            {data.scenarioDrafts.map((draft) => {
+            {filteredScenarioDrafts.map((draft) => {
               const draftAsset = data.assets.find((asset) => asset.id === draft.asset_id);
               const draftAccount = data.accounts.find((account) => account.id === draft.account_id);
               return (
@@ -4228,7 +4271,7 @@ function WhatIfView({ data, input }: { data: PortfolioData; input: WhatIfFormInp
                     <Link className="rounded-2xl border border-border bg-surface px-4 py-2 text-sm font-medium" data-testid="scenario-draft-open-link" href={scenarioDraftHref(draft)}>
                       Open
                     </Link>
-                    {canEdit && (
+                    {canEdit && draft.status !== "archived" && (
                       <form action={archiveScenarioDraft}>
                         <input name="scenario_draft_id" type="hidden" value={draft.id} />
                         <button className="rounded-2xl border border-border bg-surface px-4 py-2 text-sm font-medium text-red-700" data-testid="scenario-draft-archive-button" type="submit">
@@ -4578,6 +4621,7 @@ function SectionContent({
   priceError,
   positionFilters,
   recommendationFilters,
+  scenarioDraftFilters,
   advisorThreadId,
   advisorSourceDocumentId,
   newsFilters,
@@ -4615,6 +4659,7 @@ function SectionContent({
   priceError?: string;
   positionFilters: PositionFilterInput;
   recommendationFilters: RecommendationFilterInput;
+  scenarioDraftFilters: ScenarioDraftFilterInput;
   advisorThreadId?: string;
   advisorSourceDocumentId?: string;
   newsFilters: NewsFilterInput;
@@ -4656,7 +4701,7 @@ function SectionContent({
     return (
       <div className="space-y-6">
         <Stage8Notice stage8Error={stage8Error} stage8Saved={stage8Saved} />
-        <WhatIfView data={data} input={whatIfInput} />
+        <WhatIfView data={data} filters={scenarioDraftFilters} input={whatIfInput} />
       </div>
     );
   }
@@ -4777,6 +4822,12 @@ export default async function SectionPage({
     commission: queryValue(query.commission),
     sourceRecommendationId: queryValue(query.source_recommendation_id),
   };
+  const scenarioDraftFilters: ScenarioDraftFilterInput = {
+    status: queryValue(query.scenario_draft_status),
+    assetId: queryValue(query.scenario_draft_asset_id),
+    dateFrom: queryValue(query.scenario_draft_date_from),
+    dateTo: queryValue(query.scenario_draft_date_to),
+  };
   const eventFilters: EventFilterInput = {
     type: queryValue(query.event_type_filter),
   };
@@ -4801,6 +4852,7 @@ export default async function SectionPage({
           priced={queryValue(query.priced)}
           positionFilters={positionFilters}
           recommendationFilters={recommendationFilters}
+          scenarioDraftFilters={scenarioDraftFilters}
           advisorThreadId={queryValue(query.advisor_thread_id)}
           advisorSourceDocumentId={queryValue(query.source_document_id)}
           newsFilters={newsFilters}

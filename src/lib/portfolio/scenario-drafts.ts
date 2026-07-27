@@ -1,3 +1,4 @@
+import type { ScenarioDraft } from "./data";
 import type { WhatIfScenarioResult } from "./scenarios";
 
 export type ScenarioDraftStatus = "draft" | "archived";
@@ -40,6 +41,18 @@ export type ScenarioDraftBuildResult =
   | { ok: true; draft: ScenarioDraftInsert }
   | { ok: false; error: "title-required" | "account-required" | "asset-required" | "date-required" | "quantity-required" | "price-required" | "currency-invalid" };
 
+export type ScenarioDraftFilterInput = {
+  status?: string | null;
+  assetId?: string | null;
+  dateFrom?: string | null;
+  dateTo?: string | null;
+};
+
+export function normalizeScenarioDraftStatusFilter(value: string | null | undefined) {
+  if (value === "all" || value === "archived") return value;
+  return "draft";
+}
+
 function parsePositive(value: string | number | null | undefined) {
   const parsed = typeof value === "number" ? value : Number(String(value ?? "").trim().replace(/\s/g, "").replace(",", "."));
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -57,6 +70,21 @@ function normalizeCurrencyCode(value: string | null | undefined) {
 
 function isIsoDate(value: string | null | undefined) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value ?? ""));
+}
+
+export function filterScenarioDrafts(drafts: ScenarioDraft[], filters: ScenarioDraftFilterInput) {
+  const status = normalizeScenarioDraftStatusFilter(filters.status);
+  const assetId = String(filters.assetId ?? "").trim();
+  const dateFrom = isIsoDate(filters.dateFrom) ? String(filters.dateFrom) : null;
+  const dateTo = isIsoDate(filters.dateTo) ? String(filters.dateTo) : null;
+
+  return drafts.filter((draft) => {
+    if (status !== "all" && draft.status !== status) return false;
+    if (assetId && draft.asset_id !== assetId) return false;
+    if (dateFrom && draft.trade_date < dateFrom) return false;
+    if (dateTo && draft.trade_date > dateTo) return false;
+    return true;
+  });
 }
 
 export function scenarioDraftHref(input: {

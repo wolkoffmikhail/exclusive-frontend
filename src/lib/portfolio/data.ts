@@ -692,9 +692,8 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       .from("scenario_drafts")
       .select("id, family_id, owner_user_id, title, status, scenario_type, account_id, asset_id, trade_date, quantity, price, currency_code, commission, source_recommendation_id, input_payload, result_snapshot, created_by, updated_by, created_at, updated_at")
       .eq("family_id", family.id)
-      .neq("status", "archived")
       .order("updated_at", { ascending: false })
-      .limit(20),
+      .limit(100),
     supabase
       .from("advisor_threads")
       .select("id, family_id, created_by, title, context_scope, created_at, updated_at")

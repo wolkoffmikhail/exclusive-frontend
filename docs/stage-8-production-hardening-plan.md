@@ -5,7 +5,8 @@ Updated: 2026-07-27.
 Current implementation note:
 
 - First saved what-if scenario slice is implemented locally and applied to production database: `scenario_drafts` migration/RLS, save/reopen/archive server actions, active draft list in `what-if`, focused unit tests and browser smoke coverage.
-- Remaining saved scenario work: richer filters, compare mode and advisor draft creation from `what_if_prefill`.
+- Scenario draft filters by status, asset and trade date are implemented in the `what-if` list.
+- Remaining saved scenario work: compare mode and advisor draft creation from `what_if_prefill`.
 
 ## Goal
 
