@@ -2406,7 +2406,7 @@ function limitAlertLimitId(alert: PortfolioData["systemAlerts"][number]) {
 
 function LimitsSettingsView({ data }: { data: PortfolioData }) {
   const canManage = canManageFamily(data.family?.role);
-  const activeLimitAlerts = data.systemAlerts.filter((alert) => alert.source === "limits");
+  const activeLimitAlerts = data.systemAlerts.filter((alert) => alert.source === "limits" && (alert.status === "active" || alert.status === "triggered"));
 
   return (
     <section className="rounded-3xl border border-border bg-surface p-6" data-testid="limits-settings">
