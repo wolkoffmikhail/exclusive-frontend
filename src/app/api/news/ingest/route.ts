@@ -1,28 +1,13 @@
 import { revalidatePath } from "next/cache";
 import { NextRequest, NextResponse } from "next/server";
 import { runScheduledNewsIngestion, createSupabaseScheduledNewsIngestionStore } from "@/lib/server/news-ingestion/scheduled";
+import { isAuthorizedCronSecretRequest } from "@/lib/server/news-ingestion/cron-auth";
 import { createServiceRoleClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 
-function configuredSecret() {
-  return process.env.NEWS_INGEST_SECRET || process.env.CRON_SECRET || null;
-}
-
-function bearerToken(request: NextRequest) {
-  const authorization = request.headers.get("authorization") ?? "";
-  const match = /^Bearer\s+(.+)$/i.exec(authorization);
-  return match?.[1]?.trim() ?? null;
-}
-
 export function isAuthorizedNewsIngestionRequest(request: NextRequest) {
-  const expected = configuredSecret();
-  if (!expected) return { ok: false, reason: "news_ingest_secret_missing" };
-
-  const actual = bearerToken(request) || request.headers.get("x-cron-secret")?.trim() || null;
-  if (actual !== expected) return { ok: false, reason: "unauthorized" };
-
-  return { ok: true, reason: null };
+  return isAuthorizedCronSecretRequest(request);
 }
 
 function commaList(value: string | null) {
