@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { buildFallbackRecommendationExplanation, buildFallbackSourceDocumentAnalysis } from "./document-analysis";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildFallbackRecommendationExplanation, buildFallbackSourceDocumentAnalysis, buildSourceDocumentAnalysis } from "./document-analysis";
 
 const document = {
   id: "doc-1",
@@ -12,6 +12,29 @@ const document = {
   published_at: "2026-07-23T10:00:00.000Z",
   raw_excerpt: "Board recommended a dividend. Details require source review.",
 };
+
+const llmEnvKeys = [
+  "LLM_API_KEY",
+  "LLM_BASE_URL",
+  "LLM_DISABLED",
+  "LLM_MODEL",
+  "LLM_PROVIDER",
+] as const;
+const savedEnv = Object.fromEntries(llmEnvKeys.map((key) => [key, process.env[key]]));
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+
+  for (const key of llmEnvKeys) {
+    const value = savedEnv[key];
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+});
 
 describe("buildFallbackSourceDocumentAnalysis", () => {
   it("builds a cited ready analysis for confirmed links", () => {
@@ -58,6 +81,46 @@ describe("buildFallbackSourceDocumentAnalysis", () => {
     expect(analysis.impact_level).toBe("unknown");
     expect(analysis.portfolio_links).toEqual([]);
     expect(analysis.limitations).toContain("No confirmed asset link is available yet.");
+  });
+});
+
+describe("buildSourceDocumentAnalysis", () => {
+  it("falls back to a cited local analysis when provider output is rejected", async () => {
+    process.env.LLM_PROVIDER = "openai-compatible";
+    process.env.LLM_BASE_URL = "https://llm.example.test/v1";
+    process.env.LLM_MODEL = "configured-model";
+    process.env.LLM_API_KEY = "secret-api-key";
+    delete process.env.LLM_DISABLED;
+
+    vi.stubGlobal("fetch", async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ answer: "Missing required structured fields." }) } }],
+      }),
+    }));
+
+    const analysis = await buildSourceDocumentAnalysis({
+      document,
+      links: [
+        {
+          asset_id: "asset-1",
+          label: "Sberbank",
+          ticker: "SBER",
+          status: "confirmed",
+          confidence: 0.98,
+        },
+      ],
+    });
+
+    expect(analysis).toMatchObject({
+      status: "ready",
+      model: "local-fallback",
+      prompt_version: "stage7-local-fallback-v1",
+    });
+    expect(analysis.citations.map((citation) => citation.id)).toContain("source-document:doc-1");
+    expect(analysis.safety_flags).toEqual(expect.arrayContaining(["invalid_schema", "llm_provider_fallback"]));
+    expect(analysis.limitations.join(" ")).toContain("provider_invalid_structured_output");
   });
 });
 
