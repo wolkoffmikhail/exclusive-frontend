@@ -357,6 +357,29 @@ export type LlmAnalysis = {
   updated_at: string;
 };
 
+export type ScenarioDraft = {
+  id: string;
+  family_id: string;
+  owner_user_id: string;
+  title: string;
+  status: "draft" | "archived" | string;
+  scenario_type: "buy" | "sell" | string;
+  account_id: string;
+  asset_id: string;
+  trade_date: string;
+  quantity: number | string;
+  price: number | string;
+  currency_code: string;
+  commission: number | string;
+  source_recommendation_id: string | null;
+  input_payload: Record<string, unknown>;
+  result_snapshot: Record<string, unknown>;
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type AdvisorThread = {
   id: string;
   family_id: string;
@@ -421,6 +444,7 @@ export type PortfolioData = {
   sourceDocuments: SourceDocument[];
   sourceDocumentLinks: SourceDocumentLink[];
   llmAnalyses: LlmAnalysis[];
+  scenarioDrafts: ScenarioDraft[];
   advisorThreads: AdvisorThread[];
   advisorMessages: AdvisorMessage[];
   issuerAliases: IssuerAlias[];
@@ -501,6 +525,7 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       sourceDocuments: [],
       sourceDocumentLinks: [],
       llmAnalyses: [],
+      scenarioDrafts: [],
       advisorThreads: [],
       advisorMessages: [],
       issuerAliases: [],
@@ -530,6 +555,7 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
     sourceDocuments,
     sourceDocumentLinks,
     llmAnalyses,
+    scenarioDrafts,
     advisorThreads,
     advisorMessages,
     issuerAliases,
@@ -663,6 +689,13 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
       .order("created_at", { ascending: false })
       .limit(100),
     supabase
+      .from("scenario_drafts")
+      .select("id, family_id, owner_user_id, title, status, scenario_type, account_id, asset_id, trade_date, quantity, price, currency_code, commission, source_recommendation_id, input_payload, result_snapshot, created_by, updated_by, created_at, updated_at")
+      .eq("family_id", family.id)
+      .neq("status", "archived")
+      .order("updated_at", { ascending: false })
+      .limit(20),
+    supabase
       .from("advisor_threads")
       .select("id, family_id, created_by, title, context_scope, created_at, updated_at")
       .eq("family_id", family.id)
@@ -762,6 +795,7 @@ export async function getPortfolioData(supabase: SupabaseClient, family: ActiveF
     sourceDocuments: rows<SourceDocument>(sourceDocuments.data),
     sourceDocumentLinks: rows<SourceDocumentLink>(sourceDocumentLinks.data),
     llmAnalyses: rows<LlmAnalysis>(llmAnalyses.data),
+    scenarioDrafts: rows<ScenarioDraft>(scenarioDrafts.data),
     advisorThreads: rows<AdvisorThread>(advisorThreads.data),
     advisorMessages: rows<AdvisorMessage>(advisorMessages.data),
     issuerAliases: rows<IssuerAlias>(issuerAliases.data),

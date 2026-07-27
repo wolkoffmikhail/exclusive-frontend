@@ -8,6 +8,7 @@ import { filterPortfolioEvents, splitPortfolioEvents, type EventFilterInput } fr
 import { filterAndSortPositions, groupPositionsByAssetType, type PositionFilterInput } from "@/lib/portfolio/position-filters";
 import { canEditFamilyData, canManageFamily } from "@/lib/portfolio/permissions";
 import { latestRecommendationExplanationById } from "@/lib/portfolio/recommendation-explanations";
+import { scenarioDraftHref } from "@/lib/portfolio/scenario-drafts";
 import { runWhatIfScenario, type ScenarioMetricDelta, type WhatIfScenarioResult } from "@/lib/portfolio/scenarios";
 import { sourceDocumentsForAsset } from "@/lib/portfolio/source-document-filters";
 import { filterWatchlistItems, type WatchlistFilterInput } from "@/lib/portfolio/watchlist";
@@ -18,6 +19,7 @@ import { saveManualPositionPrice } from "./position-actions";
 import { createAccount, createPortfolio } from "./settings-actions";
 import { addAssetToWatchlist, addNewsToWatchlist, archiveLimit, archiveWatchlistItem, checkLimits, createDefaultLimits, createLimit, createNewsItem, createPortfolioEvent, markRecommendationRead, saveMaxSettings, saveRecommendationToWatchlist, saveTelegramSettings, testMaxNotification, testTelegramNotification, updateLimit, updatePortfolioEvent, updateRecommendationStatus, updateWatchlistItem } from "./stage5-actions";
 import { analyzeSourceDocument, askAdvisor, createManualSourceDocument, explainRecommendation, ingestCbrRss, syncMoexIssuerAliases, updateSourceDocumentLinkStatus } from "./stage7-actions";
+import { archiveScenarioDraft, saveScenarioDraft } from "./stage8-actions";
 import { AdvisorSubmitButton } from "./advisor-submit-button";
 
 const sections: Record<string, { title: string; description: string }> = {
@@ -48,6 +50,7 @@ type NewsFilterInput = {
 };
 
 type WhatIfFormInput = {
+  scenarioDraftId?: string;
   scenarioType?: string;
   accountId?: string;
   assetId?: string;
@@ -186,7 +189,7 @@ function formatScenarioMetricDelta(metric: ScenarioMetricDelta) {
 }
 
 function whatIfInputHasSubmission(input: WhatIfFormInput) {
-  return Boolean(input.quantity || input.price || input.assetId || input.accountId || input.sourceRecommendationId);
+  return Boolean(input.quantity || input.price || input.assetId || input.accountId || input.sourceRecommendationId || input.scenarioDraftId);
 }
 
 function whatIfExportHref(input: WhatIfFormInput, format: "excel" | "pdf-html") {
@@ -2949,6 +2952,37 @@ function Stage7Notice({ stage7Error, stage7Saved }: { stage7Error?: string; stag
   );
 }
 
+function Stage8Notice({ stage8Error, stage8Saved }: { stage8Error?: string; stage8Saved?: string }) {
+  const errors: Record<string, string> = {
+    "no-family": "Family is not assigned.",
+    forbidden: "Viewer role cannot change scenario drafts.",
+    "title-required": "Add a scenario title before saving.",
+    "account-required": "Choose an account for the scenario.",
+    "asset-required": "Choose an asset for the scenario.",
+    "date-required": "Use a valid trade date.",
+    "quantity-required": "Quantity must be greater than zero.",
+    "price-required": "Price must be greater than zero.",
+    "currency-invalid": "Currency must be a three-letter code.",
+    "draft-required": "Scenario draft is not selected.",
+    "scenario-invalid": "Scenario cannot be saved because the calculation is invalid.",
+    "cash-insufficient": "Scenario cannot be saved: not enough cash.",
+    "position-insufficient": "Scenario cannot be saved: not enough position quantity.",
+    "save-failed": "Scenario draft was not saved.",
+    "archive-failed": "Scenario draft was not archived.",
+  };
+  const saved: Record<string, string> = {
+    "scenario-draft": "Scenario draft saved.",
+    "scenario-draft-archived": "Scenario draft archived.",
+  };
+
+  return (
+    <>
+      {stage8Error && <div className="rounded-3xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">{errors[stage8Error] ?? stage8Error}</div>}
+      {stage8Saved && <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">{saved[stage8Saved] ?? "Stage 8 action complete."}</div>}
+    </>
+  );
+}
+
 function RecommendationActionFields({ recommendation }: { recommendation: PortfolioData["recommendations"][number] }) {
   return (
     <>
@@ -3994,10 +4028,12 @@ function ScenarioResultSummary({ result }: { result: SuccessfulWhatIfScenarioRes
 function WhatIfView({ data, input }: { data: PortfolioData; input: WhatIfFormInput }) {
   const accounts = data.accounts.filter((account) => account.status === "active");
   const assets = data.assets.filter((asset) => asset.status === "active" && asset.asset_type_code !== "cash");
+  const canEdit = canEditFamilyData(data.family?.role);
   const defaultAccount = accounts.find((account) => account.id === input.accountId) ?? accounts[0];
   const defaultAsset = assets.find((asset) => asset.id === input.assetId) ?? assets[0];
   const selectedAsset = assets.find((asset) => asset.id === input.assetId) ?? defaultAsset;
   const selectedAccount = accounts.find((account) => account.id === input.accountId) ?? defaultAccount;
+  const selectedDraft = input.scenarioDraftId ? data.scenarioDrafts.find((draft) => draft.id === input.scenarioDraftId) ?? null : null;
   const selectedPosition = data.positions.find((position) => position.asset_id === selectedAsset?.id && (!selectedAccount || position.account_id === selectedAccount.id));
   const currencyOptions = Array.from(new Set([
     data.family?.baseCurrency ?? "RUB",
@@ -4047,6 +4083,11 @@ function WhatIfView({ data, input }: { data: PortfolioData; input: WhatIfFormInp
       baseCurrency: data.family.baseCurrency,
     })
     : null;
+  const defaultDraftTitle = [
+    scenarioTypeLabel(scenarioType),
+    selectedAsset?.name ?? "Asset",
+    tradeDate,
+  ].filter(Boolean).join(" - ");
 
   return (
     <div className="space-y-6" data-testid="what-if-view">
@@ -4067,6 +4108,13 @@ function WhatIfView({ data, input }: { data: PortfolioData; input: WhatIfFormInp
           <div className="mt-5 rounded-2xl border border-border bg-background p-4 text-sm">
             <p className="font-medium">{sourceRecommendation.title}</p>
             <p className="mt-1 text-muted">{sourceRecommendation.reason ?? recommendationTypeLabel(sourceRecommendation.recommendation_type)}</p>
+          </div>
+        )}
+
+        {selectedDraft && (
+          <div className="mt-5 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950" data-testid="scenario-draft-selected">
+            <p className="font-medium">Opened draft: {selectedDraft.title}</p>
+            <p className="mt-1">Updated {formatDateTime(selectedDraft.updated_at)}</p>
           </div>
         )}
 
@@ -4149,6 +4197,53 @@ function WhatIfView({ data, input }: { data: PortfolioData; input: WhatIfFormInp
         </div>
       </form>
 
+      <section className="rounded-3xl border border-border bg-surface p-6" data-testid="scenario-drafts-section">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Saved scenarios</h2>
+            <p className="mt-1 text-sm text-muted">Drafts are shared with family viewers and editable by editors/admins.</p>
+          </div>
+          <span className="rounded-2xl border border-border bg-background px-3 py-2 text-xs text-muted">{data.scenarioDrafts.length} active</span>
+        </div>
+        {data.scenarioDrafts.length === 0 ? (
+          <div className="mt-5">
+            <EmptyState text="No saved what-if scenarios yet." />
+          </div>
+        ) : (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            {data.scenarioDrafts.map((draft) => {
+              const draftAsset = data.assets.find((asset) => asset.id === draft.asset_id);
+              const draftAccount = data.accounts.find((account) => account.id === draft.account_id);
+              return (
+                <div className="rounded-2xl border border-border bg-background p-4" data-testid="scenario-draft-card" key={draft.id}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium">{draft.title}</p>
+                      <p className="mt-1 text-xs text-muted">{scenarioTypeLabel(draft.scenario_type)} - {draftAsset?.name ?? "Asset"} - {formatNumber(draft.quantity, 6)} x {formatMoney(draft.price, draft.currency_code)}</p>
+                      <p className="mt-1 text-xs text-muted">{draftAccount?.name ?? "Account"} - updated {formatDateTime(draft.updated_at)}</p>
+                    </div>
+                    <span className="rounded-xl border border-border px-2 py-1 text-xs text-muted">{draft.status}</span>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Link className="rounded-2xl border border-border bg-surface px-4 py-2 text-sm font-medium" data-testid="scenario-draft-open-link" href={scenarioDraftHref(draft)}>
+                      Open
+                    </Link>
+                    {canEdit && (
+                      <form action={archiveScenarioDraft}>
+                        <input name="scenario_draft_id" type="hidden" value={draft.id} />
+                        <button className="rounded-2xl border border-border bg-surface px-4 py-2 text-sm font-medium text-red-700" data-testid="scenario-draft-archive-button" type="submit">
+                          Archive
+                        </button>
+                      </form>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
       {!result && <EmptyState text="Заполните параметры сделки и запустите расчет. Сценарий будет построен только в памяти." />}
 
       {result && result.diagnostics.length > 0 && (
@@ -4170,6 +4265,23 @@ function WhatIfView({ data, input }: { data: PortfolioData; input: WhatIfFormInp
               <p className="mt-1 text-xs text-muted">{selectedAccount?.name ?? "Счет"} · {formatNumber(result.input.quantity, 6)} × {formatMoney(result.input.price, result.input.currencyCode)}</p>
             </div>
             <div className="flex flex-wrap gap-2">
+              {canEdit && (
+                <form action={saveScenarioDraft} className="flex flex-wrap gap-2" data-testid="scenario-draft-save-form">
+                  <input name="scenario_type" type="hidden" value={result.input.scenarioType} />
+                  <input name="account_id" type="hidden" value={result.input.accountId} />
+                  <input name="asset_id" type="hidden" value={result.input.assetId} />
+                  <input name="trade_date" type="hidden" value={result.input.tradeDate} />
+                  <input name="quantity" type="hidden" value={result.input.quantity} />
+                  <input name="price" type="hidden" value={result.input.price} />
+                  <input name="currency_code" type="hidden" value={result.input.currencyCode} />
+                  <input name="commission" type="hidden" value={result.input.commission} />
+                  <input name="source_recommendation_id" type="hidden" value={result.input.sourceRecommendationId ?? ""} />
+                  <input className="h-10 w-56 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="scenario-draft-title-input" defaultValue={selectedDraft?.title ?? defaultDraftTitle} maxLength={200} name="title" required />
+                  <button className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" data-testid="scenario-draft-save-button" type="submit">
+                    Save scenario
+                  </button>
+                </form>
+              )}
               <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" data-testid="what-if-export-excel-link" href={whatIfExportHref(input, "excel")}>
                 Excel со сценарием
               </Link>
@@ -4488,6 +4600,8 @@ function SectionContent({
   stage5Saved,
   stage7Error,
   stage7Saved,
+  stage8Error,
+  stage8Saved,
   uploaded,
 }: {
   applied?: string;
@@ -4523,6 +4637,8 @@ function SectionContent({
   stage5Saved?: string;
   stage7Error?: string;
   stage7Saved?: string;
+  stage8Error?: string;
+  stage8Saved?: string;
   uploaded?: string;
 }) {
   if (!data.family) return <EmptyState text="Для пользователя пока не назначена семья. Нужно добавить запись в family_members." />;
@@ -4536,7 +4652,14 @@ function SectionContent({
       </div>
     );
   }
-  if (section === "what-if") return <WhatIfView data={data} input={whatIfInput} />;
+  if (section === "what-if") {
+    return (
+      <div className="space-y-6">
+        <Stage8Notice stage8Error={stage8Error} stage8Saved={stage8Saved} />
+        <WhatIfView data={data} input={whatIfInput} />
+      </div>
+    );
+  }
   if (section === "accounts") return <AccountsView data={data} operationCancelled={operationCancelled} operationError={operationError} operationSaved={operationSaved} selectedAccountId={selectedAccountId} />;
   if (section === "assets") return <AssetsView data={data} operationCancelled={operationCancelled} operationError={operationError} operationSaved={operationSaved} positionFilters={positionFilters} priceError={priceError} priced={priced} selectedAssetId={selectedAssetId} />;
   if (section === "import") {
@@ -4643,6 +4766,7 @@ export default async function SectionPage({
     status: queryValue(query.watchlist_status),
   };
   const whatIfInput: WhatIfFormInput = {
+    scenarioDraftId: queryValue(query.scenario_draft_id),
     scenarioType: queryValue(query.scenario_type),
     accountId: queryValue(query.account_id),
     assetId: queryValue(query.asset_id),
@@ -4697,6 +4821,8 @@ export default async function SectionPage({
           stage5Saved={queryValue(query.stage5_saved)}
           stage7Error={queryValue(query.stage7_error)}
           stage7Saved={queryValue(query.stage7_saved)}
+          stage8Error={queryValue(query.stage8_error)}
+          stage8Saved={queryValue(query.stage8_saved)}
           uploaded={queryValue(query.uploaded)}
         />
       </div>

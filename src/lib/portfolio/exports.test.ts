@@ -124,6 +124,7 @@ function data(overrides: Partial<PortfolioData> = {}): PortfolioData {
     sourceDocuments: [],
     sourceDocumentLinks: [],
     llmAnalyses: [],
+    scenarioDrafts: [],
     advisorThreads: [],
     advisorMessages: [],
     issuerAliases: [],

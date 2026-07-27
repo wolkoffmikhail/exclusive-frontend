@@ -108,6 +108,7 @@ function data(): PortfolioData {
     }],
     sourceDocumentLinks: [],
     llmAnalyses: [],
+    scenarioDrafts: [],
     advisorThreads: [],
     advisorMessages: [],
     issuerAliases: [],

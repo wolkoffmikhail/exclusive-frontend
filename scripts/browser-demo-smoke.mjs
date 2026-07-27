@@ -152,6 +152,20 @@ async function submitStage7Action(page, trigger, expectedSavedValues = [], timeo
   assert(!error, `stage 7 action should not fail: ${error}`);
 }
 
+async function submitStage8Action(page, trigger, expectedSavedValues = [], timeout = 30_000) {
+  await submitActionForm(
+    page,
+    trigger,
+    (url) => {
+      const saved = url.searchParams.get("stage8_saved");
+      return Boolean((saved && (expectedSavedValues.length === 0 || expectedSavedValues.includes(saved))) || url.searchParams.get("stage8_error"));
+    },
+    timeout,
+  );
+  const error = queryParam(page, "stage8_error");
+  assert(!error, `stage 8 action should not fail: ${error}`);
+}
+
 async function selectFirstAccount(page) {
   const accountSelect = page.getByTestId("import-account-select");
   await assertVisible(accountSelect, "editor should see account selector");
@@ -530,7 +544,28 @@ async function assertStage6WhatIfAndExport(page) {
     extension: ".html",
     contentType: "text/html",
   });
-  console.log("ok stage 6 what-if and export downloads");
+
+  const draftTitle = `Smoke scenario ${new Date().toISOString()}`;
+  await assertVisible(page.getByTestId("scenario-draft-save-form"), "editor should be able to save what-if draft");
+  await page.getByTestId("scenario-draft-title-input").fill(draftTitle);
+  await submitStage8Action(page, page.getByTestId("scenario-draft-save-button"), ["scenario-draft"]);
+  assert(queryParam(page, "scenario_draft_id"), "saved scenario should reopen with scenario_draft_id");
+  await assertVisible(page.getByTestId("scenario-draft-selected"), "saved scenario should show opened draft banner");
+
+  await page.goto(`${baseUrl}/what-if`, { waitUntil: "networkidle" });
+  const draftCard = page.getByTestId("scenario-draft-card").filter({ hasText: draftTitle }).first();
+  await assertVisible(draftCard, "saved scenario should appear in drafts list");
+  await Promise.all([
+    page.waitForURL((url) => url.pathname === "/what-if" && Boolean(url.searchParams.get("scenario_draft_id")), { timeout: 30_000 }),
+    draftCard.getByTestId("scenario-draft-open-link").click(),
+  ]);
+  await page.waitForLoadState("networkidle");
+  await assertVisible(page.getByTestId("scenario-draft-selected"), "opened scenario draft should restore scenario inputs");
+
+  await submitStage8Action(page, draftCard.getByTestId("scenario-draft-archive-button"), ["scenario-draft-archived"]);
+  await assertNoVisible(page.getByTestId("scenario-draft-card").filter({ hasText: draftTitle }), "archived scenario should leave active drafts list");
+
+  console.log("ok stage 6 what-if/export and stage 8 scenario drafts");
 }
 
 async function ensureLinkedEvent(page) {

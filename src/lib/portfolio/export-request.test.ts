@@ -64,6 +64,7 @@ function data(): PortfolioData {
     sourceDocuments: [],
     sourceDocumentLinks: [],
     llmAnalyses: [],
+    scenarioDrafts: [],
     advisorThreads: [],
     advisorMessages: [],
     issuerAliases: [],

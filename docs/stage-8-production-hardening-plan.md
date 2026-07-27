@@ -2,6 +2,11 @@
 
 Updated: 2026-07-27.
 
+Current implementation note:
+
+- First saved what-if scenario slice is implemented locally and applied to production database: `scenario_drafts` migration/RLS, save/reopen/archive server actions, active draft list in `what-if`, focused unit tests and browser smoke coverage.
+- Remaining saved scenario work: richer filters, compare mode and advisor draft creation from `what_if_prefill`.
+
 ## Goal
 
 Turn the stage 1-7 product from a verified demo into a more operable production tool: repeatable migrations, safer runtime configuration, saved what-if scenarios, stronger reporting, better LLM quality control and clearer admin operations.
