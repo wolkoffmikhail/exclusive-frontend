@@ -60,7 +60,9 @@ Every LLM/provider response must validate against the structured advisor schema 
 
 ## Eval Set
 
-The eval set should cover:
+The implemented eval fixture set lives in `src/lib/server/llm/eval-fixtures.ts` and is covered by `src/lib/server/llm/eval-fixtures.test.ts`.
+
+It covers:
 
 - regulator news without a specific issuer;
 - disclosure for a concrete issuer;
