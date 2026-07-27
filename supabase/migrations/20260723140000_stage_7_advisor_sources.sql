@@ -143,7 +143,6 @@ create table if not exists public.issuer_aliases (
   updated_by uuid references auth.users(id),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (family_id, asset_id, lower(alias)),
   unique (id, family_id),
   foreign key (asset_id, family_id)
     references public.assets(id, family_id)
@@ -161,6 +160,9 @@ create index if not exists llm_analyses_family_document_idx
 
 create index if not exists advisor_messages_thread_created_idx
   on public.advisor_messages (family_id, thread_id, created_at);
+
+create unique index if not exists issuer_aliases_family_asset_alias_idx
+  on public.issuer_aliases (family_id, asset_id, lower(alias));
 
 drop trigger if exists news_sources_set_updated_at on public.news_sources;
 create trigger news_sources_set_updated_at
@@ -211,7 +213,15 @@ create policy news_sources_insert_admin
 on public.news_sources for insert
 to authenticated
 with check (
-  public.has_family_role(family_id, array['admin'])
+  (
+    public.has_family_role(family_id, array['admin'])
+    or (
+      public.has_family_role(family_id, array['editor'])
+      and source_code = 'manual'
+      and source_type = 'manual'
+      and requires_token = false
+    )
+  )
   and (created_by is null or created_by = auth.uid())
 );
 

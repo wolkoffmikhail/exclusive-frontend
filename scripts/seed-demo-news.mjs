@@ -6,6 +6,7 @@ loadLocalEnv();
 const supabaseUrl = process.env.SUPABASE_INTERNAL_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const familyIdFromEnv = process.env.FAMILY_ID;
+const familyNameFromEnv = process.env.DEMO_FAMILY_NAME;
 
 function fail(message) {
   console.error(`[seed-demo-news] ${message}`);
@@ -74,15 +75,20 @@ const supabase = createClient(supabaseUrl, serviceRoleKey, {
 
 let familyId = familyIdFromEnv;
 if (!familyId) {
-  const { data: family, error } = await supabase
+  let query = supabase
     .from("families")
     .select("id")
     .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+    .limit(1);
+
+  if (familyNameFromEnv) {
+    query = query.eq("name", familyNameFromEnv);
+  }
+
+  const { data: family, error } = await query.maybeSingle();
 
   if (error) fail(`family lookup failed: ${error.message}`);
-  if (!family?.id) fail("No family found. Set FAMILY_ID or create a family first.");
+  if (!family?.id) fail("No family found. Set FAMILY_ID or DEMO_FAMILY_NAME, or create a family first.");
   familyId = family.id;
 }
 

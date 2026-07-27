@@ -2399,6 +2399,11 @@ function LimitScopeSelect({ assets, defaultValue = "" }: { assets: PortfolioData
   );
 }
 
+function limitAlertLimitId(alert: PortfolioData["systemAlerts"][number]) {
+  const match = alert.fingerprint?.match(/^limit:([^:]+):/);
+  return match?.[1] ?? null;
+}
+
 function LimitsSettingsView({ data }: { data: PortfolioData }) {
   const canManage = canManageFamily(data.family?.role);
   const activeLimitAlerts = data.systemAlerts.filter((alert) => alert.source === "limits");
@@ -2507,7 +2512,7 @@ function LimitsSettingsView({ data }: { data: PortfolioData }) {
           <h3 className="text-sm font-semibold">Активные алерты</h3>
           <div className="mt-3 space-y-3">
             {activeLimitAlerts.map((alert) => (
-              <div className={`rounded-2xl border p-4 ${alert.severity === "critical" ? "border-red-200 bg-red-50 text-red-950" : "border-amber-200 bg-amber-50 text-amber-950"}`} data-testid="limit-alert-card" key={alert.id}>
+              <div className={`rounded-2xl border p-4 ${alert.severity === "critical" ? "border-red-200 bg-red-50 text-red-950" : "border-amber-200 bg-amber-50 text-amber-950"}`} data-limit-id={limitAlertLimitId(alert) ?? undefined} data-testid="limit-alert-card" key={alert.id}>
                 <p className="font-medium">{alert.title}</p>
                 <p className="mt-1 text-sm opacity-80">
                   {severityLabel(alert.severity)} · {alert.condition_type} · проверено {formatDateTime(alert.last_checked_at)}
