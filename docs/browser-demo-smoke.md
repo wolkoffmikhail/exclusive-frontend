@@ -78,6 +78,10 @@ DEMO_EDITOR_EMAIL=editor@example.com
 DEMO_EDITOR_PASSWORD=...
 ```
 
+The smoke and demo seed scripts also read `.env.local` automatically. Values already set in the shell take precedence over `.env.local`.
+
+Keep `SUPABASE_SERVICE_ROLE_KEY` out of `.env.local`; pass it only as a temporary process environment variable when seeding is required.
+
 If the environment has a Supabase service-role key, seed or update demo users first:
 
 ```bash

@@ -1,5 +1,8 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { loadLocalEnv } from "./load-local-env.mjs";
+
+loadLocalEnv();
 
 const defaultBaseUrl = "http://192.168.0.22:31010";
 const baseUrl = (process.env.DEMO_BASE_URL || process.argv[2] || defaultBaseUrl).replace(/\/$/, "");
