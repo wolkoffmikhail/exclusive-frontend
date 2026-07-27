@@ -138,14 +138,6 @@ async function submitStage5Action(page, trigger, expectedSavedValues = [], timeo
   assert(!error, `stage 5 action should not fail: ${error}`);
 }
 
-async function submitStage5FormMaybeRedirect(page, trigger, timeout = 15_000) {
-  await trigger.first().click();
-  await page.waitForURL((url) => url.searchParams.has("stage5_saved") || url.searchParams.has("stage5_error"), { timeout }).catch(() => {});
-  await page.waitForLoadState("networkidle").catch(() => {});
-  const error = queryParam(page, "stage5_error");
-  assert(!error, `stage 5 action should not fail: ${error}`);
-}
-
 async function submitStage7Action(page, trigger, expectedSavedValues = [], timeout = 90_000) {
   await submitActionForm(
     page,
@@ -270,17 +262,43 @@ async function ensureDefaultLimits(page) {
   await assertVisible(page.getByTestId("limit-card"), "default limits should be present");
 }
 
-async function configureLimit(page, limitId, { direction, severity, threshold, type }) {
+async function createSmokeLimit(page) {
+  await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
+  const beforeIds = new Set(await page.getByTestId("limit-card").evaluateAll((cards) => cards.map((card) => card.getAttribute("data-limit-id")).filter(Boolean)));
+  const createForm = page.getByTestId("create-limit-form");
+  await assertVisible(createForm, "admin should be able to create a smoke limit");
+  const assetScope = await createForm.locator("#limit-scope-options option").evaluateAll((options) =>
+    options.map((option) => option.value).find((value) => /^[0-9a-f-]{36}$/i.test(value)),
+  );
+  assert(assetScope, "admin limit smoke needs at least one asset scope option");
+
+  await createForm.locator('select[name="limit_type"]').selectOption("asset_share");
+  await createForm.locator('select[name="direction"]').selectOption("max");
+  await createForm.locator('select[name="severity"]').selectOption("warning");
+  await createForm.locator('input[name="scope_key"]').fill(assetScope);
+  await createForm.locator('input[name="threshold_value"]').fill("0.0001");
+  await page.getByTestId("create-limit-button").click();
+  await page.waitForURL((url) => url.searchParams.has("stage5_saved") || url.searchParams.has("stage5_error"), { timeout: 30_000 }).catch(() => {});
+  await page.waitForLoadState("networkidle").catch(() => {});
+  const error = queryParam(page, "stage5_error");
+  assert(!error, `stage 5 action should not fail: ${error}`);
+
+  await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
+  const afterIds = await page.getByTestId("limit-card").evaluateAll((cards) => cards.map((card) => card.getAttribute("data-limit-id")).filter(Boolean));
+  const createdId = afterIds.find((id) => !beforeIds.has(id));
+  assert(createdId, "created smoke limit should expose a stable id");
+  return createdId;
+}
+
+async function archiveLimitFromSettings(page, limitId) {
   await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
   const limitCard = page.locator(`[data-limit-id="${limitId}"]`);
-  await assertVisible(limitCard, "target limit should remain available");
-
-  await limitCard.locator('select[name="limit_type"]').selectOption(type);
-  await limitCard.locator('select[name="direction"]').selectOption(direction);
-  await limitCard.locator('select[name="severity"]').selectOption(severity);
-  await limitCard.locator('input[name="scope_key"]').fill("");
-  await limitCard.locator('input[name="threshold_value"]').fill(String(threshold));
-  await submitStage5FormMaybeRedirect(page, limitCard.locator("form").nth(1).locator('button[type="submit"]'));
+  if ((await limitCard.count()) === 0) return;
+  await limitCard.locator("form").first().locator('button[type="submit"]').click();
+  await page.waitForURL((url) => url.searchParams.has("stage5_saved") || url.searchParams.has("stage5_error"), { timeout: 30_000 }).catch(() => {});
+  await page.waitForLoadState("networkidle").catch(() => {});
+  const error = queryParam(page, "stage5_error");
+  assert(!error, `stage 5 action should not fail: ${error}`);
 }
 
 async function checkLimitsFromSettings(page, limitId = null) {
@@ -295,28 +313,20 @@ async function checkLimitsFromSettings(page, limitId = null) {
 async function assertLimitAlertLifecycle(page) {
   await ensureDefaultLimits(page);
 
-  const limitId = await page.getByTestId("limit-card").first().getAttribute("data-limit-id");
-  assert(limitId, "limit card should expose a stable id");
+  let limitId = null;
 
   try {
-    await configureLimit(page, limitId, { type: "cash_max_share", direction: "max", severity: "warning", threshold: 1 });
-    const calmAlertCount = await checkLimitsFromSettings(page, limitId);
-
-    await configureLimit(page, limitId, { type: "cash_min_share", direction: "min", severity: "warning", threshold: 0.9999 });
-    let firstViolationAlertCount = await checkLimitsFromSettings(page, limitId);
-
-    if (firstViolationAlertCount <= calmAlertCount) {
-      await configureLimit(page, limitId, { type: "cash_max_share", direction: "max", severity: "warning", threshold: 0.0001 });
-      firstViolationAlertCount = await checkLimitsFromSettings(page, limitId);
-    }
-
+    limitId = await createSmokeLimit(page);
+    const firstViolationAlertCount = await checkLimitsFromSettings(page, limitId);
     assert(firstViolationAlertCount > 0, "violated limit should create an active alert");
     const secondViolationAlertCount = await checkLimitsFromSettings(page, limitId);
     assert(secondViolationAlertCount === firstViolationAlertCount, "repeated limit checks should not duplicate active alerts");
     console.log("ok stage 5 limit alert lifecycle");
   } finally {
-    await configureLimit(page, limitId, { type: "cash_max_share", direction: "max", severity: "warning", threshold: 1 });
-    await checkLimitsFromSettings(page, limitId);
+    if (limitId) {
+      await archiveLimitFromSettings(page, limitId);
+      await checkLimitsFromSettings(page, limitId);
+    }
   }
 }
 
