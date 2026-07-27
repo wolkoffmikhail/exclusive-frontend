@@ -155,3 +155,13 @@ RLS smoke-тесты лежат в [supabase/tests](./supabase/tests).
 
 - [Dashboard и аналитика](./docs/stage-4-dashboard-analytics.md)
 - [Browser demo smoke](./docs/browser-demo-smoke.md)
+
+## Stage 5-8 documentation
+
+- [Stage 5 recommendations](./docs/stage-5-recommendations.md)
+- [Stage 5 news providers](./docs/stage-5-news-providers.md)
+- [Stage 5 signals runbook](./docs/stage-5-signals-runbook.md)
+- [Stage 6 what-if and export](./docs/stage-6-what-if-and-export.md)
+- [Stage 7 advisor and news analysis](./docs/stage-7-advisor-and-news-analysis.md)
+- [Stage 7 final acceptance](./docs/stage-7-final-acceptance-2026-07-27.md)
+- [Stage 8 production hardening plan](./docs/stage-8-production-hardening-plan.md)

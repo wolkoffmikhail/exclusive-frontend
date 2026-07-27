@@ -56,7 +56,7 @@ Every LLM/provider response must validate against the structured advisor schema 
 - MOEX ISS is limited to reference/linking metadata; real-time market data is out of scope.
 - Editorial sources are second queue and disabled until reuse/licensing terms are checked.
 - Local fallback answers are explanatory and cautious, but not a replacement for provider-backed analysis.
-- Browser and production smoke results still need to be captured against a running environment.
+- Production and browser demo smoke were captured on 2026-07-27 after the Mistral runtime, Supabase stage 7 migrations, demo seeds and Coolify redeploy were applied.
 
 ## Eval Set
 
