@@ -153,15 +153,19 @@ async function submitStage7Action(page, trigger, expectedSavedValues = [], timeo
 }
 
 async function submitStage8Action(page, trigger, expectedSavedValues = [], timeout = 30_000) {
-  await submitActionForm(
-    page,
-    trigger,
-    (url) => {
-      const saved = url.searchParams.get("stage8_saved");
-      return Boolean((saved && (expectedSavedValues.length === 0 || expectedSavedValues.includes(saved))) || url.searchParams.get("stage8_error"));
-    },
-    timeout,
-  );
+  try {
+    await Promise.all([
+      page.waitForURL((url) => {
+        const saved = url.searchParams.get("stage8_saved");
+        return Boolean((saved && (expectedSavedValues.length === 0 || expectedSavedValues.includes(saved))) || url.searchParams.get("stage8_error"));
+      }, { timeout }),
+      trigger.first().click(),
+    ]);
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    throw new Error(`stage 8 click submit did not reach expected URL from ${page.url()}: ${details}`);
+  }
+  await page.waitForLoadState("networkidle");
   const error = queryParam(page, "stage8_error");
   assert(!error, `stage 8 action should not fail: ${error}`);
 }
@@ -544,6 +548,9 @@ async function assertStage6WhatIfAndExport(page) {
     extension: ".html",
     contentType: "text/html",
   });
+
+  await page.goto(page.url(), { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("what-if-summary"), "what-if should restore scenario summary before saving draft");
 
   const draftTitle = `Smoke scenario ${new Date().toISOString()}`;
   await assertVisible(page.getByTestId("scenario-draft-save-form"), "editor should be able to save what-if draft");
