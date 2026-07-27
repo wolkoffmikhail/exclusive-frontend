@@ -9,6 +9,7 @@ export function AdvisorSubmitButton() {
     <button
       aria-disabled={pending}
       className="h-11 rounded-2xl bg-accent px-5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
+      data-testid="advisor-submit-button"
       disabled={pending}
       type="submit"
     >

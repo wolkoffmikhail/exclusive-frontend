@@ -3327,12 +3327,12 @@ function NewsView({ data, filters }: { data: PortfolioData; filters: NewsFilterI
       {canEdit && (
         <section className="rounded-3xl border border-border bg-surface p-6" data-testid="source-document-import">
           <h2 className="text-lg font-semibold">Добавить проверяемый материал</h2>
-          <form action={createManualSourceDocument} className="mt-5 grid gap-3">
+          <form action={createManualSourceDocument} className="mt-5 grid gap-3" data-testid="source-document-import-form">
             <input name="return_to" type="hidden" value="/news" />
             <div className="grid gap-3 md:grid-cols-3">
               <label className="grid gap-2 text-sm">
                 <span className="font-medium">Тип документа</span>
-                <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="document_type">
+                <select className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="source-document-type-select" name="document_type">
                   <option value="news">Новость</option>
                   <option value="issuer_disclosure">Раскрытие</option>
                   <option value="dividend">Дивиденды</option>
@@ -3341,7 +3341,7 @@ function NewsView({ data, filters }: { data: PortfolioData; filters: NewsFilterI
               </label>
               <label className="grid gap-2 text-sm">
                 <span className="font-medium">Дата публикации</span>
-                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" name="published_at" type="datetime-local" />
+                <input className="h-11 rounded-2xl border border-border bg-background px-4 text-sm" data-testid="source-document-published-input" name="published_at" type="datetime-local" />
               </label>
               <label className="grid gap-2 text-sm">
                 <span className="font-medium">Внешний ID</span>
@@ -3520,7 +3520,7 @@ function NewsView({ data, filters }: { data: PortfolioData; filters: NewsFilterI
                     <form action={analyzeSourceDocument}>
                       <input name="return_to" type="hidden" value="/news" />
                       <input name="source_document_id" type="hidden" value={document.id} />
-                      <button className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" type="submit">
+                      <button className="rounded-2xl bg-accent px-4 py-2 text-sm font-medium text-white" data-testid="source-document-analyze-button" type="submit">
                         Анализировать
                       </button>
                     </form>
@@ -3530,7 +3530,7 @@ function NewsView({ data, filters }: { data: PortfolioData; filters: NewsFilterI
                       Источник
                     </Link>
                   )}
-                  <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" href={`/advisor?source_document_id=${encodeURIComponent(document.id)}`}>
+                  <Link className="rounded-2xl border border-border bg-background px-4 py-2 text-sm font-medium" data-testid="source-document-advisor-link" href={`/advisor?source_document_id=${encodeURIComponent(document.id)}`}>
                     В советник
                   </Link>
                   {links.length === 0 && <span className="rounded-2xl border border-border bg-background px-4 py-2 text-sm text-muted">Связи пока не найдены</span>}

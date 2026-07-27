@@ -124,6 +124,20 @@ async function submitStage5Action(page, trigger, expectedSavedValues = [], timeo
   assert(!error, `stage 5 action should not fail: ${error}`);
 }
 
+async function submitStage7Action(page, trigger, expectedSavedValues = [], timeout = 90_000) {
+  await submitActionForm(
+    page,
+    trigger,
+    (url) => {
+      const saved = url.searchParams.get("stage7_saved");
+      return Boolean((saved && (expectedSavedValues.length === 0 || expectedSavedValues.includes(saved))) || url.searchParams.get("stage7_error"));
+    },
+    timeout,
+  );
+  const error = queryParam(page, "stage7_error");
+  assert(!error, `stage 7 action should not fail: ${error}`);
+}
+
 async function selectFirstAccount(page) {
   const accountSelect = page.getByTestId("import-account-select");
   await assertVisible(accountSelect, "editor should see account selector");
@@ -188,6 +202,12 @@ async function assertViewerReadOnly(page) {
   await page.goto(`${baseUrl}/news`, { waitUntil: "networkidle" });
   await assertVisible(page.getByTestId("news-view"), "viewer should open news");
   await assertNoVisible(page.getByTestId("news-watchlist-button"), "viewer should not save news to watchlist");
+  await assertNoVisible(page.getByTestId("source-document-import-form"), "viewer should not import source documents");
+  await assertNoVisible(page.getByTestId("source-document-analyze-button"), "viewer should not run source document analysis");
+
+  await page.goto(`${baseUrl}/advisor`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("advisor-view"), "viewer should open advisor");
+  await assertVisible(page.getByTestId("advisor-question-form"), "viewer should be able to ask advisor questions");
 
   await page.goto(`${baseUrl}/watchlist`, { waitUntil: "networkidle" });
   await assertVisible(page.getByTestId("watchlist-view"), "viewer should open watchlist");
@@ -370,6 +390,53 @@ async function assertStage5Signals(page) {
   console.log("ok stage 5 events");
 }
 
+async function assertStage7AdvisorAndNewsAnalysis(page) {
+  await page.goto(`${baseUrl}/news`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("news-view"), "editor should open news for stage 7");
+  await assertVisible(page.getByTestId("source-document-import-form"), "editor should see source document import");
+
+  const suffix = Date.now();
+  const title = `Stage 7 smoke SBER dividend ${suffix}`;
+  const sourceForm = page.getByTestId("source-document-import-form");
+  await sourceForm.locator('select[name="document_type"]').selectOption("dividend");
+  await sourceForm.locator('input[name="external_id"]').fill(`stage7-smoke-${suffix}`);
+  await sourceForm.locator('input[name="title"]').fill(title);
+  await sourceForm.locator('textarea[name="raw_excerpt"]').fill(
+    "Sberbank board recommended a dividend. Record date and final approval require source review. This is a smoke fixture, not a trading instruction.",
+  );
+  await sourceForm.locator('input[name="url"]').fill(`https://example.test/stage7-smoke/${suffix}`);
+  await sourceForm.locator('input[name="ticker"]').fill("SBER");
+  await sourceForm.locator('input[name="isin"]').fill("RU0009029540");
+  await sourceForm.locator('input[name="issuer_name"]').fill("Sberbank");
+  await submitStage7Action(page, sourceForm.locator('button[type="submit"]'), ["source-document", "source-document-duplicate"]);
+  await page.goto(`${baseUrl}/news`, { waitUntil: "networkidle" });
+
+  const sourceCard = page.getByTestId("source-document-card").filter({ hasText: title }).first();
+  await assertVisible(sourceCard, "created source document should be visible");
+  const analyzeForm = sourceCard.locator('input[name="source_document_id"]').first().locator("xpath=ancestor::form[1]");
+  await submitStage7Action(page, analyzeForm.locator('button[type="submit"]'), ["source-document-analysis"], 120_000);
+  await page.goto(`${baseUrl}/news`, { waitUntil: "networkidle" });
+  await assertVisible(page.getByTestId("source-document-card").filter({ hasText: title }).getByTestId("source-document-analysis"), "source document analysis should be visible");
+  console.log("ok stage 7 source document analysis");
+
+  const analyzedCard = page.getByTestId("source-document-card").filter({ hasText: title }).first();
+  await Promise.all([
+    page.waitForURL((url) => url.pathname === "/advisor" && url.searchParams.has("source_document_id"), { timeout: 10_000 }),
+    analyzedCard.locator('a[href*="/advisor?source_document_id="]').first().click(),
+  ]);
+  await page.waitForLoadState("networkidle");
+  await assertVisible(page.getByTestId("advisor-view"), "advisor should open from source document");
+  await assertVisible(page.getByTestId("advisor-question-form"), "advisor should show question form");
+
+  const advisorForm = page.getByTestId("advisor-question-form");
+  await advisorForm.locator('textarea[name="question"]').fill("Summarize the selected source document and explain what portfolio context should be checked.");
+  await submitStage7Action(page, advisorForm.locator('button[type="submit"]'), ["advisor-message"], 120_000);
+  await assertVisible(page.getByTestId("advisor-messages"), "advisor messages should be visible after asking");
+  const messageCount = await visibleCount(page.getByTestId("advisor-messages").locator("article"));
+  assert(messageCount >= 2, "advisor should persist both user and assistant messages");
+  console.log("ok stage 7 advisor flow");
+}
+
 async function assertDownloadLink(page, testId, { extension, contentType }) {
   const link = page.getByTestId(testId);
   await assertVisible(link, `${testId} should be visible`);
@@ -462,6 +529,7 @@ async function assertEditorImportFlow(page) {
     console.log("ok duplicate upload protection before fresh import; continuing with existing demo data");
     await assertDashboardAnalytics(page);
     await assertStage5Signals(page);
+    await assertStage7AdvisorAndNewsAnalysis(page);
     await assertStage6WhatIfAndExport(page);
 
     await page.goto(`${baseUrl}/assets`, { waitUntil: "networkidle" });
@@ -499,6 +567,7 @@ async function assertEditorImportFlow(page) {
 
   await assertDashboardAnalytics(page);
   await assertStage5Signals(page);
+  await assertStage7AdvisorAndNewsAnalysis(page);
   await assertStage6WhatIfAndExport(page);
 
   await page.goto(`${baseUrl}/assets`, { waitUntil: "networkidle" });
