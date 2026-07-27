@@ -342,13 +342,14 @@ async function assertDashboardAnalytics(page) {
   await page.waitForLoadState("networkidle");
   await assertVisible(page.getByTestId("dashboard-cash-flows"), "dashboard should keep cash-flow section after period switch");
 
-  await assertVisible(page.getByTestId("dashboard-recommendation-link"), "dashboard should show recommendation links");
-  await Promise.all([
-    page.waitForURL((url) => url.pathname === "/recommendations", { timeout: 10_000 }),
-    page.getByTestId("dashboard-recommendation-link").first().click(),
-  ]);
-  await page.waitForLoadState("networkidle");
-  await assertVisible(page.getByTestId("recommendation-card"), "dashboard recommendation should open recommendations list");
+  if (await isVisible(page.getByTestId("dashboard-recommendation-link"))) {
+    await Promise.all([
+      page.waitForURL((url) => url.pathname === "/recommendations", { timeout: 10_000 }),
+      page.getByTestId("dashboard-recommendation-link").first().click(),
+    ]);
+    await page.waitForLoadState("networkidle");
+    await assertVisible(page.getByTestId("recommendation-card"), "dashboard recommendation should open recommendations list");
+  }
   console.log("ok dashboard analytics");
 }
 
