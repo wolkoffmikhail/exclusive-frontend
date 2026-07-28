@@ -54,6 +54,21 @@ describe("parseCbrRssFeed", () => {
     expect(parseCbrRssFeed(rssFixture, { limit: 1 })).toHaveLength(1);
   });
 
+  it("decodes nested HTML entities from CBR descriptions", () => {
+    const documents = parseCbrRssFeed(`<?xml version="1.0" encoding="windows-1251"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>Decision</title>
+      <link>/press/pr/?file=entities-test.htm</link>
+      <description>Bank&amp;nbsp;Russia keeps inflation in&amp;nbsp;range 4&amp;ndash;5%.</description>
+    </item>
+  </channel>
+</rss>`);
+
+    expect(documents[0].rawExcerpt).toBe("Bank Russia keeps inflation in range 4-5%.");
+  });
+
   it("decodes windows-1251 CBR responses before parsing", async () => {
     const encoded = encodeWindows1251(`<?xml version="1.0" encoding="windows-1251"?>
 <rss version="2.0">

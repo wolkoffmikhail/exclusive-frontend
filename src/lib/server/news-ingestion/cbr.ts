@@ -44,6 +44,12 @@ function decodeXmlEntities(value: string) {
     .replace(/&amp;/g, "&")
     .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
     .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(Number.parseInt(code, 16)))
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&ndash;/gi, "-")
+    .replace(/&mdash;/gi, "-")
+    .replace(/&laquo;/gi, "\"")
+    .replace(/&raquo;/gi, "\"")
+    .replace(/&minus;/gi, "-")
     .trim();
 }
 
