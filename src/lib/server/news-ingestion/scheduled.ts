@@ -2,9 +2,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { sourceDefinitionByCode, type NormalizedSourceDocument } from "../../portfolio/news-sources";
 import { buildMoexAliasRowsForAsset, fetchMoexSecurityReference, moexIssBaseUrl, type MoexSecurityReference } from "./moex";
 import { cbrRssPressUrl, cbrSourceCode, fetchCbrRssFeed } from "./cbr";
+import { buildForeignInsightAdapters, defaultForeignInsightLimit, type ForeignInsightSourceCode } from "./foreign-feeds";
 import { runSourceIngestion, sourceIngestionErrorSummary } from "./runner";
 
-export type ScheduledNewsSourceCode = "cbr" | "moex_iss";
+export type ScheduledNewsSourceCode = "cbr" | "moex_iss" | ForeignInsightSourceCode;
 
 type SourceDocumentDuplicate = {
   id: string;
@@ -60,18 +61,31 @@ export type ScheduledNewsIngestionStore = {
 
 export type ScheduledNewsIngestionOptions = {
   cbrLimit?: number;
+  foreignInsightLimit?: number;
+  enableForeignInsights?: boolean;
   familyIds?: string[];
   familyLimit?: number;
   now?: Date;
   syncMoexAliases?: boolean;
   moexAssetLimit?: number;
+  secUserAgent?: string;
   fetchCbrDocuments?: () => Promise<NormalizedSourceDocument[]>;
+  fetchForeignInsightDocuments?: () => Promise<NormalizedSourceDocument[]>;
   fetchMoexReference?: (lookup: string) => Promise<MoexSecurityReference | null>;
 };
 
 export type ScheduledNewsIngestionFamilyResult = {
   familyId: string;
   cbr: {
+    createdCount: number;
+    updatedCount: number;
+    skippedCount: number;
+    fetchedCount: number;
+    failedCount: number;
+    error: string | null;
+  };
+  foreignInsights: {
+    enabled: boolean;
     createdCount: number;
     updatedCount: number;
     skippedCount: number;
@@ -95,6 +109,8 @@ export type ScheduledNewsIngestionSummary = {
   familyCount: number;
   cbrFetchedCount: number;
   cbrFailedCount: number;
+  foreignInsightFetchedCount: number;
+  foreignInsightFailedCount: number;
   results: ScheduledNewsIngestionFamilyResult[];
 };
 
@@ -109,25 +125,13 @@ function positiveInteger(value: number | undefined, fallback: number) {
 function sourcePayload(sourceCode: ScheduledNewsSourceCode) {
   const definition = sourceDefinitionByCode(sourceCode);
 
-  if (sourceCode === "cbr") {
-    return {
-      source_code: "cbr",
-      source_name: definition?.source_name ?? "Bank of Russia",
-      source_type: "regulator",
-      base_url: "https://www.cbr.ru/",
-      requires_token: false,
-      terms_status: definition?.default_terms_status ?? "approved",
-      terms_checked_at: definition?.terms_checked_at ?? null,
-    };
-  }
-
   return {
-    source_code: "moex_iss",
-    source_name: definition?.source_name ?? "MOEX ISS",
-    source_type: "exchange_reference",
-    base_url: moexIssBaseUrl,
-    requires_token: false,
-    terms_status: definition?.default_terms_status ?? "restricted",
+    source_code: sourceCode,
+    source_name: definition?.source_name ?? (sourceCode === "moex_iss" ? "MOEX ISS" : sourceCode),
+    source_type: definition?.source_type ?? (sourceCode === "moex_iss" ? "exchange_reference" : "regulator"),
+    base_url: definition?.base_url ?? (sourceCode === "cbr" ? "https://www.cbr.ru/" : sourceCode === "moex_iss" ? moexIssBaseUrl : null),
+    requires_token: definition?.requires_token ?? false,
+    terms_status: definition?.default_terms_status ?? (sourceCode === "moex_iss" ? "restricted" : "approved"),
     terms_checked_at: definition?.terms_checked_at ?? null,
   };
 }
@@ -330,6 +334,106 @@ export function createSupabaseScheduledNewsIngestionStore(supabase: SupabaseClie
   };
 }
 
+async function persistSourceDocumentsForFamily({
+  auditAction,
+  auditAfterData,
+  documents,
+  error,
+  failedCount,
+  familyId,
+  fetchedCount,
+  sourceCode,
+  startedAt,
+  store,
+}: {
+  auditAction: string;
+  auditAfterData: Record<string, unknown>;
+  documents: NormalizedSourceDocument[];
+  error: string | null;
+  failedCount: number;
+  familyId: string;
+  fetchedCount: number;
+  sourceCode: ScheduledNewsSourceCode;
+  startedAt: string;
+  store: ScheduledNewsIngestionStore;
+}) {
+  const sourceId = await store.ensureNewsSource({ familyId, sourceCode });
+  let createdCount = 0;
+  let updatedCount = 0;
+  let skippedCount = 0;
+
+  for (const document of documents) {
+    const duplicateId = await store.findSourceDocumentDuplicate({
+      familyId,
+      sourceId,
+      externalId: document.externalId,
+      contentHash: document.contentHash,
+    });
+
+    if (duplicateId) {
+      if (duplicateId.match === "external_id") {
+        try {
+          await store.updateSourceDocument({
+            familyId,
+            sourceId,
+            documentId: duplicateId.id,
+            document,
+          });
+          updatedCount += 1;
+          continue;
+        } catch {
+          skippedCount += 1;
+          continue;
+        }
+      }
+
+      skippedCount += 1;
+      continue;
+    }
+
+    try {
+      await store.insertSourceDocument({ familyId, sourceId, document });
+      createdCount += 1;
+    } catch {
+      skippedCount += 1;
+    }
+  }
+
+  await store.updateNewsSourceRun({
+    familyId,
+    sourceId,
+    status: failedCount > 0 && createdCount === 0 && updatedCount === 0 && skippedCount === 0 ? "failed" : "active",
+    lastSuccessAt: createdCount > 0 || updatedCount > 0 || skippedCount > 0 ? startedAt : null,
+    lastError: error,
+  });
+
+  await store.addAudit({
+    familyId,
+    action: auditAction,
+    entityTable: "news_sources",
+    entityId: sourceId,
+    afterData: {
+      source_code: sourceCode,
+      created_count: createdCount,
+      updated_count: updatedCount,
+      skipped_count: skippedCount,
+      fetched_count: fetchedCount,
+      failed_sources: failedCount,
+      ingestion_error: error,
+      ...auditAfterData,
+    },
+  });
+
+  return {
+    createdCount,
+    updatedCount,
+    skippedCount,
+    fetchedCount,
+    failedCount,
+    error,
+  };
+}
+
 async function syncMoexAliasesForFamily({
   familyId,
   fetchMoexReference,
@@ -421,6 +525,8 @@ export async function runScheduledNewsIngestion(
       familyCount: 0,
       cbrFetchedCount: 0,
       cbrFailedCount: 0,
+      foreignInsightFetchedCount: 0,
+      foreignInsightFailedCount: 0,
       results: [],
     };
   }
@@ -434,74 +540,88 @@ export async function runScheduledNewsIngestion(
   ]);
   const documents = cbrIngestion.results.flatMap((result) => result.documents);
   const cbrError = sourceIngestionErrorSummary(cbrIngestion) || null;
+  const foreignInsightLimit = positiveInteger(options.foreignInsightLimit, defaultForeignInsightLimit);
+  const foreignIngestion = options.enableForeignInsights
+    ? await runSourceIngestion(options.fetchForeignInsightDocuments
+      ? [{ sourceCode: "foreign_insights", fetchDocuments: options.fetchForeignInsightDocuments }]
+      : buildForeignInsightAdapters({ limit: foreignInsightLimit, secUserAgent: options.secUserAgent }))
+    : { results: [], fetchedCount: 0, failedCount: 0 };
+  const foreignError = sourceIngestionErrorSummary(foreignIngestion) || null;
   const results: ScheduledNewsIngestionFamilyResult[] = [];
 
   for (const family of families) {
-    const cbrSourceId = await store.ensureNewsSource({ familyId: family.id, sourceCode: "cbr" });
-    let createdCount = 0;
-    let updatedCount = 0;
-    let skippedCount = 0;
+    const cbr = await persistSourceDocumentsForFamily({
+      auditAction: "scheduled_ingest_cbr_rss",
+      auditAfterData: {
+        feed_url: cbrRssPressUrl,
+      },
+      documents,
+      error: cbrError,
+      failedCount: cbrIngestion.failedCount,
+      familyId: family.id,
+      fetchedCount: cbrIngestion.fetchedCount,
+      sourceCode: "cbr",
+      startedAt,
+      store,
+    });
 
-    for (const document of documents) {
-      const duplicateId = await store.findSourceDocumentDuplicate({
-        familyId: family.id,
-        sourceId: cbrSourceId,
-        externalId: document.externalId,
-        contentHash: document.contentHash,
-      });
+    const foreignInsights = {
+      enabled: Boolean(options.enableForeignInsights),
+      createdCount: 0,
+      updatedCount: 0,
+      skippedCount: 0,
+      fetchedCount: foreignIngestion.fetchedCount,
+      failedCount: foreignIngestion.failedCount,
+      error: foreignError,
+    };
 
-      if (duplicateId) {
-        if (duplicateId.match === "external_id") {
-          try {
-            await store.updateSourceDocument({
-              familyId: family.id,
-              sourceId: cbrSourceId,
-              documentId: duplicateId.id,
-              document,
-            });
-            updatedCount += 1;
-            continue;
-          } catch {
-            skippedCount += 1;
-            continue;
+    if (options.enableForeignInsights) {
+      for (const sourceResult of foreignIngestion.results) {
+        if (sourceResult.sourceCode === "foreign_insights") {
+          const documentsBySourceCode = new Map<ScheduledNewsSourceCode, NormalizedSourceDocument[]>();
+          for (const document of sourceResult.documents) {
+            const sourceCode = document.sourceCode as ScheduledNewsSourceCode;
+            documentsBySourceCode.set(sourceCode, [...(documentsBySourceCode.get(sourceCode) ?? []), document]);
           }
+
+          for (const [sourceCode, sourceDocuments] of documentsBySourceCode) {
+            const sourcePersistResult = await persistSourceDocumentsForFamily({
+              auditAction: "scheduled_ingest_foreign_insight_feed",
+              auditAfterData: {},
+              documents: sourceDocuments,
+              error: foreignError,
+              failedCount: foreignIngestion.failedCount,
+              familyId: family.id,
+              fetchedCount: sourceDocuments.length,
+              sourceCode,
+              startedAt,
+              store,
+            });
+            foreignInsights.createdCount += sourcePersistResult.createdCount;
+            foreignInsights.updatedCount += sourcePersistResult.updatedCount;
+            foreignInsights.skippedCount += sourcePersistResult.skippedCount;
+          }
+        } else {
+          const sourcePersistResult = await persistSourceDocumentsForFamily({
+            auditAction: "scheduled_ingest_foreign_insight_feed",
+            auditAfterData: {
+              feed_source: sourceResult.sourceCode,
+            },
+            documents: sourceResult.documents,
+            error: sourceResult.ok ? null : sourceResult.error,
+            failedCount: sourceResult.ok ? 0 : 1,
+            familyId: family.id,
+            fetchedCount: sourceResult.fetchedCount,
+            sourceCode: sourceResult.sourceCode as ScheduledNewsSourceCode,
+            startedAt,
+            store,
+          });
+          foreignInsights.createdCount += sourcePersistResult.createdCount;
+          foreignInsights.updatedCount += sourcePersistResult.updatedCount;
+          foreignInsights.skippedCount += sourcePersistResult.skippedCount;
         }
-
-        skippedCount += 1;
-        continue;
-      }
-
-      try {
-        await store.insertSourceDocument({ familyId: family.id, sourceId: cbrSourceId, document });
-        createdCount += 1;
-      } catch {
-        skippedCount += 1;
       }
     }
-
-    await store.updateNewsSourceRun({
-      familyId: family.id,
-      sourceId: cbrSourceId,
-      status: cbrIngestion.failedCount > 0 && createdCount === 0 && skippedCount === 0 ? "failed" : "active",
-      lastSuccessAt: createdCount > 0 || updatedCount > 0 || skippedCount > 0 ? startedAt : null,
-      lastError: cbrError,
-    });
-
-    await store.addAudit({
-      familyId: family.id,
-      action: "scheduled_ingest_cbr_rss",
-      entityTable: "news_sources",
-      entityId: cbrSourceId,
-      afterData: {
-        feed_url: cbrRssPressUrl,
-        created_count: createdCount,
-        updated_count: updatedCount,
-        skipped_count: skippedCount,
-        fetched_count: cbrIngestion.fetchedCount,
-        failed_sources: cbrIngestion.failedCount,
-        ingestion_error: cbrError,
-      },
-    });
 
     const moexAliases = options.syncMoexAliases
       ? await syncMoexAliasesForFamily({
@@ -521,25 +641,21 @@ export async function runScheduledNewsIngestion(
 
     results.push({
       familyId: family.id,
-      cbr: {
-        createdCount,
-        updatedCount,
-        skippedCount,
-        fetchedCount: cbrIngestion.fetchedCount,
-        failedCount: cbrIngestion.failedCount,
-        error: cbrError,
-      },
+      cbr,
+      foreignInsights,
       moexAliases,
     });
   }
 
   return {
-    ok: cbrIngestion.failedCount === 0,
+    ok: cbrIngestion.failedCount === 0 && foreignIngestion.failedCount === 0,
     startedAt,
     finishedAt: new Date().toISOString(),
     familyCount: families.length,
     cbrFetchedCount: cbrIngestion.fetchedCount,
     cbrFailedCount: cbrIngestion.failedCount,
+    foreignInsightFetchedCount: foreignIngestion.fetchedCount,
+    foreignInsightFailedCount: foreignIngestion.failedCount,
     results,
   };
 }

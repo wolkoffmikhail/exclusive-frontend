@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { normalizeSourceDocumentCandidate } from "../../portfolio/news-sources";
-import { runScheduledNewsIngestion, type ScheduledNewsIngestionStore } from "./scheduled";
+import { normalizeSourceDocumentCandidate, type NormalizedSourceDocument } from "../../portfolio/news-sources";
+import { runScheduledNewsIngestion, type ScheduledNewsIngestionStore, type ScheduledNewsSourceCode } from "./scheduled";
 
 function cbrDocument(id: string) {
   return normalizeSourceDocumentCandidate({
@@ -16,12 +16,25 @@ function cbrDocument(id: string) {
   });
 }
 
-type FakeDocument = ReturnType<typeof cbrDocument>;
+function foreignDocument(sourceCode: "sec_edgar" | "ecb_blog", id: string) {
+  return normalizeSourceDocumentCandidate({
+    sourceCode,
+    externalId: id,
+    url: `https://example.test/${sourceCode}/${id}`,
+    title: `${sourceCode} document ${id}`,
+    publishedAt: "2026-07-27T08:00:00.000Z",
+    language: "en",
+    documentType: sourceCode === "sec_edgar" ? "8_k" : "insight",
+    trustLevel: "primary",
+    rawExcerpt: "Foreign insight excerpt.",
+    payload: { provider: sourceCode },
+  });
+}
 
 class FakeScheduledStore implements ScheduledNewsIngestionStore {
   families = [{ id: "family-1" }, { id: "family-2" }];
   sources = new Map<string, string>();
-  documents = new Map<string, FakeDocument & { id: string }>();
+  documents = new Map<string, NormalizedSourceDocument & { id: string }>();
   sourceRuns: unknown[] = [];
   audits: Array<{ action: string; familyId: string; afterData: Record<string, unknown> }> = [];
   assets = new Map<string, Array<{ id: string; ticker: string | null; isin: string | null; name: string }>>();
@@ -38,7 +51,7 @@ class FakeScheduledStore implements ScheduledNewsIngestionStore {
     return this.families.slice(0, limit);
   }
 
-  async ensureNewsSource({ familyId, sourceCode }: { familyId: string; sourceCode: "cbr" | "moex_iss" }) {
+  async ensureNewsSource({ familyId, sourceCode }: { familyId: string; sourceCode: ScheduledNewsSourceCode }) {
     const key = `${familyId}:${sourceCode}`;
     const existing = this.sources.get(key);
     if (existing) return existing;
@@ -76,7 +89,7 @@ class FakeScheduledStore implements ScheduledNewsIngestionStore {
   }: {
     familyId: string;
     sourceId: string;
-    document: FakeDocument;
+    document: NormalizedSourceDocument;
   }) {
     const id = `${familyId}:${sourceId}:${document.externalId ?? document.contentHash}`;
     this.documents.set(id, {
@@ -203,6 +216,43 @@ describe("runScheduledNewsIngestion", () => {
       expect.objectContaining({ familyId: "family-1", status: "failed", lastError: "cbr:network timeout" }),
       expect.objectContaining({ familyId: "family-2", status: "failed", lastError: "cbr:network timeout" }),
     ]);
+  });
+
+  it("optionally loads foreign insight documents into their own sources", async () => {
+    const store = new FakeScheduledStore();
+
+    const summary = await runScheduledNewsIngestion(store, {
+      familyIds: ["family-1"],
+      fetchCbrDocuments: async () => [],
+      enableForeignInsights: true,
+      fetchForeignInsightDocuments: async () => [
+        foreignDocument("sec_edgar", "filing-1"),
+        foreignDocument("ecb_blog", "blog-1"),
+      ],
+      now: new Date("2026-07-27T09:00:00.000Z"),
+    });
+
+    expect(summary).toMatchObject({
+      ok: true,
+      foreignInsightFetchedCount: 2,
+      foreignInsightFailedCount: 0,
+      results: [
+        {
+          familyId: "family-1",
+          foreignInsights: {
+            enabled: true,
+            createdCount: 2,
+            skippedCount: 0,
+            fetchedCount: 2,
+            failedCount: 0,
+            error: null,
+          },
+        },
+      ],
+    });
+    expect(store.sources.has("family-1:sec_edgar")).toBe(true);
+    expect(store.sources.has("family-1:ecb_blog")).toBe(true);
+    expect(store.audits.filter((audit) => audit.action === "scheduled_ingest_foreign_insight_feed")).toHaveLength(2);
   });
 
   it("optionally refreshes MOEX issuer aliases for better relevance linking", async () => {

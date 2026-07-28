@@ -33,10 +33,13 @@ export async function POST(request: NextRequest) {
   const supabase = createServiceRoleClient();
   const summary = await runScheduledNewsIngestion(createSupabaseScheduledNewsIngestionStore(supabase), {
     cbrLimit: integerEnv("NEWS_INGEST_CBR_LIMIT"),
+    foreignInsightLimit: integerEnv("NEWS_INGEST_FOREIGN_INSIGHT_LIMIT"),
+    enableForeignInsights: enabledEnv("NEWS_INGEST_ENABLE_FOREIGN_INSIGHTS"),
     familyIds: commaList(process.env.NEWS_INGEST_FAMILY_IDS ?? null),
     familyLimit: integerEnv("NEWS_INGEST_FAMILY_LIMIT"),
     syncMoexAliases: enabledEnv("NEWS_INGEST_SYNC_MOEX_ALIASES"),
     moexAssetLimit: integerEnv("NEWS_INGEST_MOEX_ASSET_LIMIT"),
+    secUserAgent: process.env.NEWS_INGEST_SEC_USER_AGENT,
   });
 
   revalidatePath("/news");
