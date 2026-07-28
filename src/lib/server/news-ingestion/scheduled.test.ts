@@ -16,10 +16,12 @@ function cbrDocument(id: string) {
   });
 }
 
+type FakeDocument = ReturnType<typeof cbrDocument>;
+
 class FakeScheduledStore implements ScheduledNewsIngestionStore {
   families = [{ id: "family-1" }, { id: "family-2" }];
   sources = new Map<string, string>();
-  documents = new Map<string, { id: string; externalId: string | null; contentHash: string | null }>();
+  documents = new Map<string, FakeDocument & { id: string }>();
   sourceRuns: unknown[] = [];
   audits: Array<{ action: string; familyId: string; afterData: Record<string, unknown> }> = [];
   assets = new Map<string, Array<{ id: string; ticker: string | null; isin: string | null; name: string }>>();
@@ -58,8 +60,10 @@ class FakeScheduledStore implements ScheduledNewsIngestionStore {
     contentHash: string | null;
   }) {
     for (const document of this.documents.values()) {
-      if (document.contentHash && document.contentHash === contentHash) return document.id;
-      if (document.externalId && document.externalId === externalId && document.id.startsWith(`${familyId}:${sourceId}:`)) return document.id;
+      if (document.contentHash && document.contentHash === contentHash) return { id: document.id, match: "content_hash" as const };
+      if (document.externalId && document.externalId === externalId && document.id.startsWith(`${familyId}:${sourceId}:`)) {
+        return { id: document.id, match: "external_id" as const };
+      }
     }
 
     return null;
@@ -72,15 +76,24 @@ class FakeScheduledStore implements ScheduledNewsIngestionStore {
   }: {
     familyId: string;
     sourceId: string;
-    document: ReturnType<typeof cbrDocument>;
+    document: FakeDocument;
   }) {
     const id = `${familyId}:${sourceId}:${document.externalId ?? document.contentHash}`;
     this.documents.set(id, {
+      ...document,
       id,
-      externalId: document.externalId,
-      contentHash: document.contentHash,
     });
     return id;
+  }
+
+  async updateSourceDocument({
+    document,
+    documentId,
+  }: Parameters<ScheduledNewsIngestionStore["updateSourceDocument"]>[0]) {
+    this.documents.set(documentId, {
+      ...document,
+      id: documentId,
+    });
   }
 
   async updateNewsSourceRun(input: Parameters<ScheduledNewsIngestionStore["updateNewsSourceRun"]>[0]) {
@@ -136,6 +149,38 @@ describe("runScheduledNewsIngestion", () => {
     });
     expect(second.results[0].cbr).toMatchObject({ createdCount: 0, skippedCount: 2 });
     expect(store.audits.filter((audit) => audit.action === "scheduled_ingest_cbr_rss")).toHaveLength(2);
+  });
+
+  it("updates existing CBR documents matched by external id so mojibake can be repaired", async () => {
+    const store = new FakeScheduledStore();
+    const sourceId = await store.ensureNewsSource({ familyId: "family-1", sourceCode: "cbr" });
+    const badDocument = cbrDocument("doc-1");
+    await store.insertSourceDocument({
+      familyId: "family-1",
+      sourceId,
+      document: {
+        ...badDocument,
+        title: "Р‘Р°РЅРє Р РѕСЃСЃРёРё",
+        rawExcerpt: "РћРїРёСЃР°РЅРёРµ",
+        contentHash: "old-mojibake-hash",
+      },
+    });
+
+    const goodDocument = {
+      ...cbrDocument("doc-1"),
+      title: "Банк России",
+      rawExcerpt: "Описание",
+    };
+
+    const summary = await runScheduledNewsIngestion(store, {
+      familyIds: ["family-1"],
+      fetchCbrDocuments: async () => [goodDocument],
+    });
+    const stored = Array.from(store.documents.values())[0];
+
+    expect(summary.results[0].cbr).toMatchObject({ createdCount: 0, updatedCount: 1, skippedCount: 0 });
+    expect(stored.title).toBe("Банк России");
+    expect(stored.rawExcerpt).toBe("Описание");
   });
 
   it("marks every target family failed when the CBR feed cannot be fetched", async () => {

@@ -8,6 +8,32 @@ type CbrRssParseOptions = {
   limit?: number;
 };
 
+const cbrDefaultCharset = "windows-1251";
+
+function normalizeCharset(value: string | null) {
+  const normalized = value?.trim().replace(/^["']|["']$/g, "").toLowerCase() ?? "";
+  if (normalized === "windows-1251" || normalized === "cp1251") return "windows-1251";
+  if (normalized === "utf-8" || normalized === "utf8") return "utf-8";
+  return null;
+}
+
+function charsetFromContentType(value: string | null) {
+  const match = /charset\s*=\s*([^;\s]+)/i.exec(value ?? "");
+  return normalizeCharset(match?.[1] ?? null);
+}
+
+function charsetFromXmlDeclaration(bytes: ArrayBuffer) {
+  const prefix = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 512));
+  const match = /<\?xml[^>]*encoding\s*=\s*["']([^"']+)["']/i.exec(prefix);
+  return normalizeCharset(match?.[1] ?? null);
+}
+
+export async function decodeCbrRssResponse(response: Response) {
+  const bytes = await response.arrayBuffer();
+  const charset = charsetFromContentType(response.headers.get("content-type")) ?? charsetFromXmlDeclaration(bytes) ?? cbrDefaultCharset;
+  return new TextDecoder(charset).decode(bytes);
+}
+
 function decodeXmlEntities(value: string) {
   return value
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
@@ -93,6 +119,6 @@ export async function fetchCbrRssFeed({ fetchImpl = fetch, limit }: { fetchImpl?
     throw new Error(`cbr_rss_fetch_failed:${response.status}`);
   }
 
-  const xml = await response.text();
+  const xml = await decodeCbrRssResponse(response);
   return parseCbrRssFeed(xml, { feedUrl: cbrRssPressUrl, limit });
 }

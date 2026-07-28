@@ -6,6 +6,11 @@ import { runSourceIngestion, sourceIngestionErrorSummary } from "./runner";
 
 export type ScheduledNewsSourceCode = "cbr" | "moex_iss";
 
+type SourceDocumentDuplicate = {
+  id: string;
+  match: "content_hash" | "external_id";
+};
+
 export type ScheduledNewsIngestionStore = {
   listFamilies: (options: { limit: number }) => Promise<Array<{ id: string }>>;
   ensureNewsSource: (input: { familyId: string; sourceCode: ScheduledNewsSourceCode }) => Promise<string>;
@@ -14,12 +19,18 @@ export type ScheduledNewsIngestionStore = {
     sourceId: string;
     externalId: string | null;
     contentHash: string | null;
-  }) => Promise<string | null>;
+  }) => Promise<SourceDocumentDuplicate | null>;
   insertSourceDocument: (input: {
     familyId: string;
     sourceId: string;
     document: NormalizedSourceDocument;
   }) => Promise<string>;
+  updateSourceDocument: (input: {
+    familyId: string;
+    sourceId: string;
+    documentId: string;
+    document: NormalizedSourceDocument;
+  }) => Promise<void>;
   updateNewsSourceRun: (input: {
     familyId: string;
     sourceId: string;
@@ -62,6 +73,7 @@ export type ScheduledNewsIngestionFamilyResult = {
   familyId: string;
   cbr: {
     createdCount: number;
+    updatedCount: number;
     skippedCount: number;
     fetchedCount: number;
     failedCount: number;
@@ -171,7 +183,7 @@ export function createSupabaseScheduledNewsIngestionStore(supabase: SupabaseClie
           .maybeSingle();
 
         if (error) throw new Error(`source document hash lookup failed: ${error.message}`);
-        if (data?.id) return String(data.id);
+        if (data?.id) return { id: String(data.id), match: "content_hash" };
       }
 
       if (externalId) {
@@ -184,7 +196,7 @@ export function createSupabaseScheduledNewsIngestionStore(supabase: SupabaseClie
           .maybeSingle();
 
         if (error) throw new Error(`source document external lookup failed: ${error.message}`);
-        if (data?.id) return String(data.id);
+        if (data?.id) return { id: String(data.id), match: "external_id" };
       }
 
       return null;
@@ -215,6 +227,30 @@ export function createSupabaseScheduledNewsIngestionStore(supabase: SupabaseClie
 
       if (error || !data?.id) throw new Error(`source document insert failed: ${error?.message ?? "unknown"}`);
       return String(data.id);
+    },
+
+    async updateSourceDocument({ familyId, sourceId, documentId, document }) {
+      const { error } = await supabase
+        .from("source_documents")
+        .update({
+          url: document.url,
+          title: document.title,
+          published_at: document.publishedAt,
+          issuer_name: document.issuerName,
+          ticker: document.ticker,
+          isin: document.isin,
+          language: document.language,
+          document_type: document.documentType,
+          trust_level: document.trustLevel,
+          raw_excerpt: document.rawExcerpt,
+          content_hash: document.contentHash,
+          payload: document.payload,
+        })
+        .eq("family_id", familyId)
+        .eq("source_id", sourceId)
+        .eq("id", documentId);
+
+      if (error) throw new Error(`source document update failed: ${error.message}`);
     },
 
     async updateNewsSourceRun({ familyId, sourceId, status, lastSuccessAt, lastError }) {
@@ -403,6 +439,7 @@ export async function runScheduledNewsIngestion(
   for (const family of families) {
     const cbrSourceId = await store.ensureNewsSource({ familyId: family.id, sourceCode: "cbr" });
     let createdCount = 0;
+    let updatedCount = 0;
     let skippedCount = 0;
 
     for (const document of documents) {
@@ -414,6 +451,22 @@ export async function runScheduledNewsIngestion(
       });
 
       if (duplicateId) {
+        if (duplicateId.match === "external_id") {
+          try {
+            await store.updateSourceDocument({
+              familyId: family.id,
+              sourceId: cbrSourceId,
+              documentId: duplicateId.id,
+              document,
+            });
+            updatedCount += 1;
+            continue;
+          } catch {
+            skippedCount += 1;
+            continue;
+          }
+        }
+
         skippedCount += 1;
         continue;
       }
@@ -430,7 +483,7 @@ export async function runScheduledNewsIngestion(
       familyId: family.id,
       sourceId: cbrSourceId,
       status: cbrIngestion.failedCount > 0 && createdCount === 0 && skippedCount === 0 ? "failed" : "active",
-      lastSuccessAt: createdCount > 0 || skippedCount > 0 ? startedAt : null,
+      lastSuccessAt: createdCount > 0 || updatedCount > 0 || skippedCount > 0 ? startedAt : null,
       lastError: cbrError,
     });
 
@@ -442,6 +495,7 @@ export async function runScheduledNewsIngestion(
       afterData: {
         feed_url: cbrRssPressUrl,
         created_count: createdCount,
+        updated_count: updatedCount,
         skipped_count: skippedCount,
         fetched_count: cbrIngestion.fetchedCount,
         failed_sources: cbrIngestion.failedCount,
@@ -469,6 +523,7 @@ export async function runScheduledNewsIngestion(
       familyId: family.id,
       cbr: {
         createdCount,
+        updatedCount,
         skippedCount,
         fetchedCount: cbrIngestion.fetchedCount,
         failedCount: cbrIngestion.failedCount,
